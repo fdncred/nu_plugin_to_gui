@@ -14,7 +14,49 @@ use std::collections::BTreeSet;
 ///   column named `"value"`.
 /// * Other complex values are stringified via `Debug`.
 ///
-pub fn values_to_table(values: &[Value]) -> TableData {
+pub fn values_to_table(values: &[Value], transpose: bool) -> TableData {
+    // helper that turns any scalar/complex value into a string for our table.
+    fn value_to_string(v: &Value) -> String {
+        match v {
+            Value::String { val, .. } => val.clone(),
+            Value::Int { val, .. } => val.to_string(),
+            Value::Float { val, .. } => val.to_string(),
+            Value::Bool { val, .. } => val.to_string(),
+            Value::Date { val, .. } => val.to_string(),
+            Value::Filesize { val, .. } => val.to_string(),
+            Value::Record { val: rec, .. } => {
+                let pairs: Vec<String> = rec
+                    .as_ref()
+                    .iter()
+                    .map(|(k, v)| format!("{}: {}", k, value_to_string(v)))
+                    .collect();
+                format!("{{{}}}", pairs.join(", "))
+            }
+            Value::List { vals, .. } => {
+                let elems: Vec<String> = vals.iter().map(value_to_string).collect();
+                format!("[{}]", elems.join(", "))
+            }
+            _ => format!("{:?}", v),
+        }
+    }
+
+    // If requested, and we only have a single record at the top level, convert
+    // it to a two‑column key/value table.  This is handy when people pipe a
+    // lone record into `to-gui` and expect to see the fields laid out as rows.
+    if transpose {
+        if values.len() == 1 {
+            if let Value::Record { val: rec, .. } = &values[0] {
+                let rec = rec.as_ref();
+                let mut cols = vec!["key".to_string(), "value".to_string()];
+                let mut rows = Vec::new();
+                for (k, v) in rec.iter() {
+                    rows.push(vec![k.clone(), value_to_string(v)]);
+                }
+                return TableData::new(cols, rows);
+            }
+        }
+    }
+
     let mut columns = BTreeSet::new();
 
     // first pass: collect column names from all records
@@ -38,23 +80,6 @@ pub fn values_to_table(values: &[Value]) -> TableData {
 
     if cols_vec.is_empty() {
         cols_vec.push("value".into());
-    }
-
-    fn value_to_string(v: &Value) -> String {
-        use Value::*;
-        match v {
-            String { val, .. } => val.clone(),
-            Int { val, .. } => val.to_string(),
-            Float { val, .. } => val.to_string(),
-            Bool { val, .. } => val.to_string(),
-            Date { val, .. } => val.to_string(),
-            Filesize { val, .. } => val.to_string(),
-            // For any other values we still fall back to `Debug`.  This
-            // isn't ideal for every possible datatype, but handling the
-            // common ones (string/int/float/bool/date/filesize) is enough
-            // to avoid the ugly output the user reported.
-            _ => format!("{:?}", v),
-        }
     }
 
     let rows: Vec<Vec<String>> = values
@@ -97,7 +122,7 @@ mod tests {
     #[test]
     fn scalar_values_produce_value_column() {
         let vals = vec![Value::int(1, Span::unknown()), Value::string("foo", Span::unknown())];
-        let table = values_to_table(&vals);
+        let table = values_to_table(&vals, false);
         assert_eq!(table.columns, vec!["value".to_string()]);
         assert_eq!(table.rows.len(), 2);
         assert_eq!(table.rows[0][0], "1");
@@ -114,7 +139,7 @@ mod tests {
         };
         let fs = Value::Filesize { val: 12345, span: Span::unknown() };
         
-        let table = values_to_table(&[dt.clone(), fs.clone()]);
+        let table = values_to_table(&[dt.clone(), fs.clone()], false);
         assert_eq!(table.columns, vec!["value".to_string()]);
         // both rows should not contain the word "Date {" or "Filesize {";
         // that's the debug output we were previously seeing.
@@ -141,8 +166,36 @@ mod tests {
         let r1 = make_record(&[("a", Value::int(1, Span::unknown()))]);
         let r2 = make_record(&[("a", Value::int(2, Span::unknown()))]);
         let list = Value::list(vec![r1.clone(), r2.clone()], Span::unknown());
-        let table = values_to_table(&[list]);
+        let table = values_to_table(&[list], false);
         assert_eq!(table.columns, vec!["a"]);
         assert_eq!(table.rows.len(), 2);
+    }
+
+    #[test]
+    fn single_record_transposes_by_default() {
+        let rec = make_record(&[("foo", Value::string("bar", Span::unknown()))]);
+        let table = values_to_table(&[rec], true);
+        // two columns: key and value, one row for the single field
+        assert_eq!(table.columns, vec!["key".to_string(), "value".to_string()]);
+        assert_eq!(table.rows, vec![vec!["foo".to_string(), "bar".to_string()]]);
+    }
+
+    #[test]
+    fn transpose_disabled_leaves_record_as_columns() {
+        let rec = make_record(&[("foo", Value::string("bar", Span::unknown()))]);
+        let table = values_to_table(&[rec], false);
+        assert_eq!(table.columns, vec!["foo".to_string()]);
+        assert_eq!(table.rows, vec![vec!["bar".to_string()]]);
+    }
+
+    #[test]
+    fn nested_structures_are_stringified() {
+        let nest = Value::list(
+            vec![Value::record(vec!["x".to_string()], vec![Value::int(5, Span::unknown())], Span::unknown())],
+            Span::unknown(),
+        );
+        let table = values_to_table(&[nest], false);
+        assert!(table.rows[0][0].starts_with("["));
+        assert!(table.rows[0][0].contains("x: 5"));
     }
 }

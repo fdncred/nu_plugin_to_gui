@@ -8,7 +8,7 @@ pub mod gui;
 pub mod value_conv;
 
 use nu_plugin::{Plugin, PluginCommand, EvaluatedCall, EngineInterface};
-use nu_protocol::{Value, LabeledError, PipelineData, Signature};
+use nu_protocol::{Value, LabeledError, PipelineData, Signature, SyntaxShape};
 
 /// The plugin type returned to Nushell.
 pub struct ToGuiPlugin;
@@ -39,20 +39,32 @@ impl PluginCommand for ToGuiCommand {
     }
 
     fn signature(&self) -> Signature {
-        Signature::build("to-gui").input_output_types(vec![(nu_protocol::Type::Any, nu_protocol::Type::Any)])
+        Signature::build("to-gui")
+            .input_output_types(vec![(nu_protocol::Type::Any, nu_protocol::Type::Any)])
+            .named("no-transpose", SyntaxShape::Nothing, "do not auto-transpose a single record into key/value rows", None)
+            .named("no-autosize", SyntaxShape::Nothing, "disable automatic column sizing (enabled by default)", None)
+            .named("filter", SyntaxShape::String, "initial filter string", None)
     }
 
     fn run(
         &self,
         _plugin: &ToGuiPlugin,
         _engine: &EngineInterface,
-        _call: &EvaluatedCall,
+        call: &EvaluatedCall,
         input: PipelineData,
     ) -> Result<PipelineData, LabeledError> {
-        let values: Vec<Value> = input.into_iter().collect();
-        let table = crate::value_conv::values_to_table(&values);
+        // parse configuration flags
+        let no_transpose = call.has_flag("no-transpose")?;
+        let no_autosize = call.has_flag("no-autosize")?;
+        let initial_filter: Option<String> = call.get_flag("filter")?;
 
-        if let Err(err) = crate::gui::run_table_gui(table) {
+        let transpose = !no_transpose;
+        let autosize = !no_autosize;
+
+        let values: Vec<Value> = input.into_iter().collect();
+        let table = crate::value_conv::values_to_table(&values, transpose);
+
+        if let Err(err) = crate::gui::run_table_gui(table, initial_filter, autosize) {
             eprintln!("to-gui: GUI error: {:#?}", err);
         }
 

@@ -17,9 +17,26 @@ pub struct NushellTableDelegate {
 }
 
 impl NushellTableDelegate {
-    pub fn new(data: TableData) -> Self {
+    /// `autosize` will adjust the column width based on the longest
+    /// string in each column when the delegate is created.
+    pub fn new(mut data: TableData, autosize: bool) -> Self {
         let count = data.rows.len();
-        let columns = data.columns.iter().map(|c| Column::new(c.clone(), c.clone()).sortable()).collect();
+        let mut columns: Vec<Column> = data.columns.iter().map(|c| Column::new(c.clone(), c.clone()).sortable()).collect();
+        if autosize {
+            for (col_ix, col) in columns.iter_mut().enumerate() {
+                // compute max cell length in this column including header
+                let max_len = data
+                    .rows
+                    .iter()
+                    .map(|row| row.get(col_ix).map(|s| s.len()).unwrap_or(0))
+                    .chain(std::iter::once(col.name.len()))
+                    .max()
+                    .unwrap_or(0);
+                // approximate pixels: assume ~8px per char plus padding
+                let width = ((max_len as f32) * 8.0 + 20.0).into();
+                col.width = width;
+            }
+        }
         let original_order: Vec<usize> = (0..count).collect();
         NushellTableDelegate {
             all_rows: data.rows,
@@ -92,8 +109,8 @@ struct ToGuiView {
 }
 
 impl ToGuiView {
-    fn new(window: &mut Window, cx: &mut Context<ToGuiView>, table_data: TableData) -> Self {
-        let delegate = NushellTableDelegate::new(table_data);
+    fn new(window: &mut Window, cx: &mut Context<ToGuiView>, table_data: TableData, initial_filter: Option<String>, autosize: bool) -> Self {
+        let delegate = NushellTableDelegate::new(table_data, autosize);
         let table_state = cx.new(|cx| TableState::new(delegate, window, cx)
             .col_resizable(true)
             .col_movable(true)
@@ -113,6 +130,15 @@ impl ToGuiView {
                 });
             }
         }).detach();
+
+        // if we were given an initial filter, apply it now
+        if let Some(f) = initial_filter.clone() {
+            filter_input.update(cx, |input, cx| input.set_value(f.clone(), window, cx));
+            // also inform the delegate explicitly in case the subscription doesn't fire
+            table_state.update(cx, |table, _| {
+                table.delegate_mut().set_filter(Some(f.clone()));
+            });
+        }
 
         ToGuiView { filter_input, table_state }
     }
@@ -148,9 +174,24 @@ mod tests {
     }
 
     #[test]
+    fn autosize_columns_wider_when_requested() {
+        let table = make_table(vec!["a"], vec![vec!["loooong" ]]);
+        let d = NushellTableDelegate::new(table, true);
+        // default width if not autosized would be 100px
+        assert!(d.columns[0].width > px(100.0));
+    }
+
+    #[test]
+    fn autosize_can_be_disabled() {
+        let table = make_table(vec!["a"], vec![vec!["loooong" ]]);
+        let d = NushellTableDelegate::new(table, false);
+        assert_eq!(d.columns[0].width, px(100.0));
+    }
+
+    #[test]
     fn sorting_changes_order() {
         let table = make_table(vec!["a", "b"], vec![vec!["2", "x"], vec!["1", "y"]]);
-        let mut d = NushellTableDelegate::new(table);
+        let mut d = NushellTableDelegate::new(table, false);
         // initial order
         assert_eq!(d.visible_rows, vec![0, 1]);
         // windows and contexts aren't used by our implementation, so we
@@ -166,7 +207,7 @@ mod tests {
     #[test]
     fn filtering_hides_rows() {
         let table = make_table(vec!["a"], vec![vec!["foo"], vec!["bar"]]);
-        let mut d = NushellTableDelegate::new(table);
+        let mut d = NushellTableDelegate::new(table, false);
         d.set_filter(Some("ba".into()));
         assert_eq!(d.visible_rows, vec![1]);
         d.set_filter(None);
@@ -176,7 +217,7 @@ mod tests {
 
 /// Launch the GUI showing supplied table data.
 #[cfg(not(test))]
-pub fn run_table_gui(table: TableData) -> Result<()> {
+pub fn run_table_gui(table: TableData, initial_filter: Option<String>, autosize: bool) -> Result<()> {
     let app = Application::new().with_assets(gpui_component_assets::Assets);
 
     app.run(move |cx| {
@@ -184,7 +225,7 @@ pub fn run_table_gui(table: TableData) -> Result<()> {
 
         cx.spawn(async move |cx| {
             cx.open_window(WindowOptions::default(), move |window, cx| {
-                let view = cx.new(|cx| ToGuiView::new(window, cx, table.clone()));
+                let view = cx.new(|cx| ToGuiView::new(window, cx, table.clone(), initial_filter.clone(), autosize));
                 cx.new(|cx| Root::new(view, window, cx))
             })?;
 
@@ -198,7 +239,7 @@ pub fn run_table_gui(table: TableData) -> Result<()> {
 
 // during tests we don't actually bring up a window
 #[cfg(test)]
-pub fn run_table_gui(_table: TableData) -> anyhow::Result<()> {
+pub fn run_table_gui(_table: TableData, _filter: Option<String>, _autosize: bool) -> anyhow::Result<()> {
     // no-op; just verify call site compiles
     Ok(())
 }
