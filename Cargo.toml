@@ -1,0 +1,24 @@
+[package]
+name = "nu_plugin_to_gui"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+# Use local nushell workspace at 0.110.1 to avoid ListenerNonblockingMode error.
+# The path dependencies will pull whatever version is defined in the repo.
+nu-plugin = { path = "C:/Users/us991808/source/repos/forks/nushell/crates/nu-plugin" }
+nu-protocol = { path = "C:/Users/us991808/source/repos/forks/nushell/crates/nu-protocol" }
+
+# GUI libraries
+gpui = "0.2.2"
+gpui-component = "0.5.1"
+gpui-component-assets = "0.5.1" # optional icons and assets
+anyhow = "1.0"
+
+
+[patch.crates-io]
+# Nushell v0.110.0's plugin crates expect interprocess 1.x; newer 2.x
+#overrides
+# can break compilation, so pin to a compatible release.
+#interprocess = "1.2.0"
+
