@@ -151,11 +151,17 @@ fn value_to_string_with_engine(
     config: Option<&Config>,
 ) -> String {
     match v {
+        Value::Date { .. } => {
+            if let Some(cfg) = config {
+                v.to_abbreviated_string(cfg)
+            } else {
+                v.to_abbreviated_string(&Config::default())
+            }
+        }
         Value::String { .. }
         | Value::Int { .. }
         | Value::Float { .. }
         | Value::Bool { .. }
-        | Value::Date { .. }
         | Value::Filesize { .. }
         | Value::Duration { .. }
         | Value::Nothing { .. }
@@ -203,7 +209,11 @@ fn value_to_string_with_engine(
                     return json;
                 }
             }
-            format_with_config(v, config)
+            if let Ok(json) = serde_json::to_string(v) {
+                json
+            } else {
+                format_with_config(v, config)
+            }
         }
     }
 }

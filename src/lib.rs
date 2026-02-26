@@ -34,9 +34,10 @@ pub struct ColorConfig {
 }
 
 use nu_plugin::{Plugin, PluginCommand, EvaluatedCall, EngineInterface};
-use nu_protocol::{Value, LabeledError, PipelineData, Signature, SyntaxShape};
+use nu_protocol::{Record, Value, LabeledError, PipelineData, Signature, SyntaxShape};
 use gpui::Rgba;
 use std::collections::HashMap;
+use nu_ansi_term::Color as AnsiColor;
 
 fn parse_ansi_color_code(code: &str) -> Option<Rgba> {
     match code {
@@ -130,6 +131,49 @@ fn parse_ls_colors(ls_colors: &str) -> HashMap<String, Rgba> {
     out
 }
 
+fn parse_ls_colors_record(record: &Record) -> HashMap<String, Rgba> {
+    let mut out = HashMap::new();
+    for (key, value) in record.iter() {
+        if let Value::String { val, .. } = value {
+            if let Some(color) = parse_ls_color_value(val) {
+                out.insert(key.clone(), color);
+            }
+        }
+    }
+    out
+}
+
+fn ansi_color_to_rgba(color: AnsiColor) -> Rgba {
+    match color {
+        AnsiColor::Black => gpui::rgb(0x000000),
+        AnsiColor::DarkGray => gpui::rgb(0x808080),
+        AnsiColor::Red => gpui::rgb(0x800000),
+        AnsiColor::LightRed => gpui::rgb(0xff0000),
+        AnsiColor::Green => gpui::rgb(0x008000),
+        AnsiColor::LightGreen => gpui::rgb(0x00ff00),
+        AnsiColor::Yellow => gpui::rgb(0x808000),
+        AnsiColor::LightYellow => gpui::rgb(0xffff00),
+        AnsiColor::Blue => gpui::rgb(0x000080),
+        AnsiColor::LightBlue => gpui::rgb(0x0000ff),
+        AnsiColor::Purple => gpui::rgb(0x800080),
+        AnsiColor::LightPurple => gpui::rgb(0xff00ff),
+        AnsiColor::Magenta => gpui::rgb(0x800080),
+        AnsiColor::LightMagenta => gpui::rgb(0xff00ff),
+        AnsiColor::Cyan => gpui::rgb(0x008080),
+        AnsiColor::LightCyan => gpui::rgb(0x00ffff),
+        AnsiColor::White => gpui::rgb(0xc0c0c0),
+        AnsiColor::LightGray => gpui::rgb(0xd3d3d3),
+        AnsiColor::Default => gpui::rgb(0xffffff),
+        AnsiColor::Fixed(code) => xterm_256_to_rgb(code),
+        AnsiColor::Rgb(r, g, b) => {
+            let rr = r as u32;
+            let gg = g as u32;
+            let bb = b as u32;
+            gpui::rgb((rr << 16) | (gg << 8) | bb)
+        }
+    }
+}
+
 /// Parse a color string used in nushell's `color_config` into a `gpui::Rgba`.
 ///
 /// Supported formats:
@@ -210,38 +254,18 @@ pub fn color_config_from_map(map: &HashMap<String, Value>) -> ColorConfig {
     let mut type_styles: HashMap<String, CellStyle> = HashMap::new();
     let mut header_style: CellStyle = CellStyle::default();
 
-    for (key, value) in map {
-        let style = match value {
-            Value::String { val, .. } => CellStyle {
-                fg: parse_color(val),
-                ..CellStyle::default()
-            },
-            Value::Record { val: rec, .. } => {
-                let fg = rec
-                    .as_ref()
-                    .get("fg")
-                    .and_then(|v| if let Value::String { val, .. } = v { Some(val) } else { None })
-                    .and_then(|s| parse_color(s));
-                let bg = rec
-                    .as_ref()
-                    .get("bg")
-                    .and_then(|v| if let Value::String { val, .. } = v { Some(val) } else { None })
-                    .and_then(|s| parse_color(s));
-                let bold = rec
-                    .as_ref()
-                    .get("attr")
-                    .and_then(|v| if let Value::String { val, .. } = v { Some(val) } else { None })
-                    .map(|s| s.to_ascii_lowercase().contains("bold"))
-                    .unwrap_or(false);
-                CellStyle { fg, bg, bold }
-            }
-            _ => CellStyle::default(),
+    let parsed = nu_color_config::get_color_map(map);
+    for (key, style) in parsed {
+        let parsed_style = CellStyle {
+            fg: style.foreground.map(ansi_color_to_rgba),
+            bg: style.background.map(ansi_color_to_rgba),
+            bold: style.is_bold,
         };
 
         if key == "header" {
-            header_style = style;
+            header_style = parsed_style;
         } else {
-            type_styles.insert(key.clone(), style);
+            type_styles.insert(key, parsed_style);
         }
     }
 
@@ -313,8 +337,12 @@ impl PluginCommand for ToGuiCommand {
         let color_config = color_config_from_map(&nu_config.color_config);
 
         let mut color_config = color_config;
-        if let Ok(Some(Value::String { val, .. })) = _engine.get_env_var("LS_COLORS") {
-            color_config.ls_colors = parse_ls_colors(&val);
+        if let Ok(Some(ls_colors_val)) = _engine.get_env_var("LS_COLORS") {
+            color_config.ls_colors = match ls_colors_val {
+                Value::String { val, .. } => parse_ls_colors(&val),
+                Value::Record { val, .. } => parse_ls_colors_record(val.as_ref()),
+                _ => HashMap::new(),
+            };
         }
 
         let save_dir = _engine

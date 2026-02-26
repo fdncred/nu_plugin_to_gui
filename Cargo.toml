@@ -8,6 +8,8 @@ edition = "2024"
 # The path dependencies will pull whatever version is defined in the repo.
 nu-plugin = { path = "C:/Users/us991808/source/repos/forks/nushell/crates/nu-plugin" }
 nu-protocol = { path = "C:/Users/us991808/source/repos/forks/nushell/crates/nu-protocol" }
+nu-color-config = { path = "C:/Users/us991808/source/repos/forks/nushell/crates/nu-color-config" }
+nu-ansi-term = "0.50"
 
 # GUI libraries
 gpui = "0.2.2"
