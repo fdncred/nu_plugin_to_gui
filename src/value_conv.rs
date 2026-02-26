@@ -1,8 +1,8 @@
 //! Conversion utilities for turning Nushell `Value`/`PipelineData` into
 //! `TableData` suitable for display.
 
-use nu_protocol::{Config, Value, Span, ast::PathMember};
-use nu_plugin::EngineInterface;
+use nu_protocol::{Config, Value, Span, ast::PathMember, PipelineData};
+use nu_plugin::{EngineInterface, EvaluatedCall};
 use crate::TableData;
 use std::collections::HashMap;
 
@@ -71,6 +71,23 @@ fn closure_to_source_string(engine: &EngineInterface, value: &Value) -> Option<S
     }
 }
 
+fn highlight_with_nu(engine: &EngineInterface, source: &str, span: Span) -> Option<String> {
+    let decl = engine.find_decl("nu-highlight").ok().flatten()?;
+    let call = EvaluatedCall::new(span);
+    let input = PipelineData::value(Value::string(source.to_string(), span), None);
+    let out = engine.call_decl(decl, call, input, true, false).ok()?;
+    let value = out.into_value(span).ok()?;
+    match value {
+        Value::String { val, .. } => Some(val),
+        _ => value.coerce_string().ok(),
+    }
+}
+
+fn closure_to_display_string(engine: &EngineInterface, value: &Value) -> Option<String> {
+    let source = closure_to_source_string(engine, value)?;
+    highlight_with_nu(engine, &source, value.span()).or(Some(source))
+}
+
 fn value_to_json_value_serialize(
     v: &Value,
     engine: Option<&EngineInterface>,
@@ -105,7 +122,7 @@ fn value_to_json_value_serialize(
         )),
         Value::Closure { val, .. } => {
             let mut source = engine
-                .and_then(|engine| closure_to_source_string(engine, v))
+                .and_then(|engine| closure_to_display_string(engine, v))
                 .unwrap_or_default();
             if source.is_empty() {
                 if let Some(cache) = closure_sources {
@@ -198,7 +215,7 @@ fn value_to_string_with_engine(
         }
         Value::Closure { val, .. } => {
             if let Some(engine) = engine {
-                if let Some(source) = closure_to_source_string(engine, v) {
+                if let Some(source) = closure_to_display_string(engine, v) {
                     return source;
                 }
             }
@@ -240,7 +257,7 @@ pub(crate) fn value_to_string_with_plugin_engine(v: &Value, engine: &EngineInter
 fn collect_closure_sources(value: &Value, engine: &EngineInterface, out: &mut HashMap<usize, String>) {
     match value {
         Value::Closure { val, .. } => {
-            if let Some(source) = closure_to_source_string(engine, value) {
+            if let Some(source) = closure_to_display_string(engine, value) {
                 out.entry(val.block_id.get()).or_insert(source);
             }
         }

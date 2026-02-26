@@ -639,9 +639,11 @@ impl TableDelegate for NushellTableDelegate {
             .map(|style| style.bold)
             .unwrap_or_else(|| self.cell_bold(raw));
         let numeric = numeric_type_key_for_value(raw).is_some();
+        let mut has_ansi_segments = false;
 
         let mut div = gpui::div().size_full();
         if let Some(segments) = parse_ansi_segments(&text) {
+            has_ansi_segments = true;
             let mut text_row = gpui::div().h_flex().gap_0().w_full();
             for segment in segments.into_iter().filter(|seg| !seg.text.is_empty()) {
                 let mut part = gpui::div().child(segment.text);
@@ -657,9 +659,13 @@ impl TableDelegate for NushellTableDelegate {
         } else {
             div = div.child(text);
         }
-        if let Some(c) = fg { div = div.text_color(c); }
+        if let Some(c) = fg {
+            if !has_ansi_segments {
+                div = div.text_color(c);
+            }
+        }
         if let Some(c) = bg { div = div.bg(c); }
-        if bold { div = div.font_weight(FontWeight::BOLD); }
+        if bold && !has_ansi_segments { div = div.font_weight(FontWeight::BOLD); }
         if numeric {
             div = div.h_flex().justify_end();
         }
