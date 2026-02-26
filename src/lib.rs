@@ -30,6 +30,8 @@ pub struct CellStyle {
 pub struct ColorConfig {
     pub type_styles: std::collections::HashMap<String, CellStyle>,
     pub value_styles: std::collections::HashMap<String, std::collections::HashMap<String, CellStyle>>,
+    pub default_style: CellStyle,
+    pub use_ls_colors: bool,
     pub header_style: CellStyle,
     pub ls_colors: std::collections::HashMap<String, gpui::Rgba>,
 }
@@ -273,6 +275,7 @@ fn parse_color_name(s: &str) -> Option<Rgba> {
 pub fn color_config_from_map(map: &HashMap<String, Value>) -> ColorConfig {
     let mut type_styles: HashMap<String, CellStyle> = HashMap::new();
     let mut header_style: CellStyle = CellStyle::default();
+    let mut default_style: CellStyle = CellStyle::default();
 
     let parsed = nu_color_config::get_color_map(map);
     for (key, style) in parsed {
@@ -284,6 +287,8 @@ pub fn color_config_from_map(map: &HashMap<String, Value>) -> ColorConfig {
 
         if key == "header" {
             header_style = parsed_style;
+        } else if key == "foreground" {
+            default_style = parsed_style;
         } else {
             type_styles.insert(key, parsed_style);
         }
@@ -295,13 +300,26 @@ pub fn color_config_from_map(map: &HashMap<String, Value>) -> ColorConfig {
     if let Some(style) = type_styles.get("datetime").cloned() {
         type_styles.entry("date".to_string()).or_insert(style);
     }
+    if let Some(style) = type_styles.get("cellpath").cloned() {
+        type_styles.entry("cell-path".to_string()).or_insert(style);
+    }
+    if let Some(style) = type_styles.get("cell-path").cloned() {
+        type_styles.entry("cellpath".to_string()).or_insert(style);
+    }
 
     ColorConfig {
         type_styles,
         value_styles: HashMap::new(),
+        default_style,
+        use_ls_colors: false,
         header_style,
         ls_colors: HashMap::new(),
     }
+}
+
+fn is_ls_like_table(table: &TableData) -> bool {
+    let has = |name: &str| table.columns.iter().any(|c| c.eq_ignore_ascii_case(name));
+    has("name") && has("type") && has("size") && has("modified")
 }
 
 fn value_type_key_for_color(v: &Value) -> &'static str {
@@ -319,7 +337,7 @@ fn value_type_key_for_color(v: &Value) -> &'static str {
         Value::Closure { .. } => "closure",
         Value::Nothing { .. } => "nothing",
         Value::Binary { .. } => "binary",
-        Value::CellPath { .. } => "cell-path",
+        Value::CellPath { .. } => "cellpath",
         _ => "string",
     }
 }
@@ -671,6 +689,14 @@ impl PluginCommand for ToGuiCommand {
 
         let values: Vec<Value> = input.into_iter().collect();
 
+        let table = crate::value_conv::values_to_table_with_plugin_engine(
+            &values,
+            transpose,
+            _engine,
+            rfc3339,
+        );
+        let ls_like = is_ls_like_table(&table);
+
         // Capture Nushell runtime config so formatting can match CLI output.
         let nu_config = _engine.get_config().unwrap_or_default();
 
@@ -679,6 +705,7 @@ impl PluginCommand for ToGuiCommand {
         // value-type names (e.g. "int", "float", "string", "header") to either
         // a color name string or a record with fg/bg/attr fields.
         let mut color_config = color_config_from_map(&nu_config.color_config);
+        color_config.use_ls_colors = ls_like;
         let debug = colors_debug_enabled();
         if debug {
             eprintln!(
@@ -686,16 +713,21 @@ impl PluginCommand for ToGuiCommand {
                 nu_config.color_config.len(),
                 values.len()
             );
+            eprintln!("to-gui[color]: ls-like-table={}", ls_like);
         }
         apply_closure_color_overrides(&mut color_config, &nu_config.color_config, _engine, &values);
-        if let Ok(Some(ls_colors_val)) = _engine.get_env_var("LS_COLORS") {
-            color_config.ls_colors = match ls_colors_val {
-                Value::String { val, .. } => parse_ls_colors(&val),
-                Value::Record { val, .. } => parse_ls_colors_record(val.as_ref()),
-                _ => HashMap::new(),
-            };
+        if color_config.use_ls_colors {
+            if let Ok(Some(ls_colors_val)) = _engine.get_env_var("LS_COLORS") {
+                color_config.ls_colors = match ls_colors_val {
+                    Value::String { val, .. } => parse_ls_colors(&val),
+                    Value::Record { val, .. } => parse_ls_colors_record(val.as_ref()),
+                    _ => HashMap::new(),
+                };
+            } else {
+                color_config.ls_colors = default_ls_colors_from_nushell(&values);
+            }
         } else {
-            color_config.ls_colors = default_ls_colors_from_nushell(&values);
+            color_config.ls_colors.clear();
         }
 
         if debug {
@@ -733,12 +765,6 @@ impl PluginCommand for ToGuiCommand {
             .unwrap_or_else(|_| std::env::current_dir().map(|p| p.display().to_string()).unwrap_or_else(|_| ".".to_string()));
 
         let closure_sources = crate::value_conv::collect_closure_sources_with_plugin_engine(&values, _engine);
-        let table = crate::value_conv::values_to_table_with_plugin_engine(
-            &values,
-            transpose,
-            _engine,
-            rfc3339,
-        );
 
         #[cfg(test)]
         let _ = (&initial_filter, autosize, &save_dir, &table, &closure_sources, rfc3339);

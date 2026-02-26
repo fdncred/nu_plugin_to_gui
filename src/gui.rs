@@ -47,6 +47,10 @@ pub struct ColorConfig {
     pub type_styles: HashMap<String, CellStyle>,
     /// Dynamic per-value styles keyed by nushell type name then serialized value key.
     pub value_styles: HashMap<String, HashMap<String, CellStyle>>,
+    /// Fallback style (e.g. from nushell `color_config.foreground`).
+    pub default_style: CellStyle,
+    /// Whether LS_COLORS should be applied to ls-like table columns.
+    pub use_ls_colors: bool,
     /// Style for column headers (from `color_config.header`).
     pub header_style: CellStyle,
     /// Parsed `$LS_COLORS` entries (`di`, `ln`, `*.rs`, ...).
@@ -55,6 +59,32 @@ pub struct ColorConfig {
 
 fn style_cache_key(v: &Value) -> String {
     serde_json::to_string(v).unwrap_or_else(|_| format!("{:?}", v.get_type()))
+}
+
+fn numeric_string_key(s: &str) -> Option<&'static str> {
+    let trimmed = s.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    if trimmed.parse::<i64>().is_ok() {
+        return Some("int");
+    }
+
+    if trimmed.parse::<f64>().is_ok() {
+        return Some("float");
+    }
+
+    None
+}
+
+fn numeric_type_key_for_value(v: &Value) -> Option<&'static str> {
+    match v {
+        Value::Int { .. } | Value::Filesize { .. } | Value::Duration { .. } => Some("int"),
+        Value::Float { .. } => Some("float"),
+        Value::String { val, .. } => numeric_string_key(val),
+        _ => None,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -138,15 +168,7 @@ impl NushellTableDelegate {
                 .iter()
                 .filter_map(|row| row.get(col_ix))
                 .filter(|v| !matches!(v, Value::Nothing { .. }))
-                .all(|v| {
-                    matches!(
-                        v,
-                        Value::Int { .. }
-                            | Value::Float { .. }
-                            | Value::Filesize { .. }
-                            | Value::Duration { .. }
-                    )
-                });
+                .all(|v| numeric_type_key_for_value(v).is_some());
             if numeric {
                 col.align = TextAlign::Right;
             }
@@ -254,6 +276,12 @@ impl NushellTableDelegate {
             .type_styles
             .get(key)
             .and_then(|style| style.fg)
+            .or_else(|| {
+                numeric_type_key_for_value(raw)
+                    .and_then(|numeric_key| self.color_config.type_styles.get(numeric_key))
+                    .and_then(|style| style.fg)
+            })
+            .or(self.color_config.default_style.fg)
     }
 
     fn cell_bg(&self, raw: &Value) -> Option<Rgba> {
@@ -270,6 +298,12 @@ impl NushellTableDelegate {
             .type_styles
             .get(key)
             .and_then(|style| style.bg)
+            .or_else(|| {
+                numeric_type_key_for_value(raw)
+                    .and_then(|numeric_key| self.color_config.type_styles.get(numeric_key))
+                    .and_then(|style| style.bg)
+            })
+            .or(self.color_config.default_style.bg)
     }
 
     fn cell_bold(&self, raw: &Value) -> bool {
@@ -286,7 +320,26 @@ impl NushellTableDelegate {
             .type_styles
             .get(key)
             .map(|style| style.bold)
-            .unwrap_or(false)
+            .or_else(|| {
+                numeric_type_key_for_value(raw)
+                    .and_then(|numeric_key| self.color_config.type_styles.get(numeric_key))
+                    .map(|style| style.bold)
+            })
+            .unwrap_or(self.color_config.default_style.bold)
+    }
+
+    fn cellpath_style(&self) -> Option<&CellStyle> {
+        self.color_config
+            .type_styles
+            .get("cellpath")
+            .or_else(|| self.color_config.type_styles.get("cell-path"))
+    }
+
+    fn is_transposed_key_column(&self, col_ix: usize) -> bool {
+        col_ix == 0
+            && self.columns.len() == 2
+            && self.columns[0].name.eq_ignore_ascii_case("key")
+            && self.columns[1].name.eq_ignore_ascii_case("value")
     }
 
     fn ls_key_for_row_type(&self, real_row: usize) -> Option<&'static str> {
@@ -313,6 +366,9 @@ impl NushellTableDelegate {
     }
 
     fn ls_fg_for_name_cell(&self, real_row: usize, col_ix: usize) -> Option<Rgba> {
+        if !self.color_config.use_ls_colors {
+            return None;
+        }
         let col_name = self.columns.get(col_ix).map(|c| c.name.to_lowercase())?;
         if col_name != "name" && col_name != "type" {
             return None;
@@ -362,7 +418,7 @@ fn value_type_key(v: &Value) -> &'static str {
         Value::Closure { .. }  => "closure",
         Value::Nothing { .. }  => "nothing",
         Value::Binary { .. }   => "binary",
-        Value::CellPath { .. } => "cell-path",
+        Value::CellPath { .. } => "cellpath",
         _                      => "string",
     }
 }
@@ -569,13 +625,20 @@ impl TableDelegate for NushellTableDelegate {
         let real_row = self.visible_rows[row_ix];
         let text = self.all_rows[real_row][col_ix].clone();
         let raw  = &self.raw_rows[real_row][col_ix];
-        let fg   = self.ls_fg_for_name_cell(real_row, col_ix).or_else(|| self.cell_fg(raw));
-        let bg   = self.cell_bg(raw);
-        let bold = self.cell_bold(raw);
-        let numeric = matches!(
-            raw,
-            Value::Int { .. } | Value::Float { .. } | Value::Filesize { .. } | Value::Duration { .. }
-        );
+        let key_style = if self.is_transposed_key_column(col_ix) {
+            self.cellpath_style()
+        } else {
+            None
+        };
+        let fg   = self
+            .ls_fg_for_name_cell(real_row, col_ix)
+            .or_else(|| key_style.and_then(|style| style.fg))
+            .or_else(|| self.cell_fg(raw));
+        let bg   = key_style.and_then(|style| style.bg).or_else(|| self.cell_bg(raw));
+        let bold = key_style
+            .map(|style| style.bold)
+            .unwrap_or_else(|| self.cell_bold(raw));
+        let numeric = numeric_type_key_for_value(raw).is_some();
 
         let mut div = gpui::div().size_full();
         if let Some(segments) = parse_ansi_segments(&text) {
