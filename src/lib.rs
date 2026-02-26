@@ -307,8 +307,9 @@ impl PluginCommand for ToGuiCommand {
     fn signature(&self) -> Signature {
         Signature::build("to-gui")
             .input_output_types(vec![(nu_protocol::Type::Any, nu_protocol::Type::Any)])
-            .named("no-transpose", SyntaxShape::Nothing, "do not auto-transpose a single record into key/value rows", None)
-            .named("no-autosize", SyntaxShape::Nothing, "disable automatic column sizing (enabled by default)", None)
+            .switch("no-transpose", "do not auto-transpose a single record into key/value rows", None)
+            .switch("no-autosize", "disable automatic column sizing (enabled by default)", None)
+            .switch("rfc3339", "format all datetime values in RFC3339", None)
             .named("filter", SyntaxShape::String, "initial filter string", None)
     }
 
@@ -322,6 +323,7 @@ impl PluginCommand for ToGuiCommand {
         // parse configuration flags
         let no_transpose = call.has_flag("no-transpose")?;
         let no_autosize = call.has_flag("no-autosize")?;
+        let rfc3339 = call.has_flag("rfc3339")?;
         let initial_filter: Option<String> = call.get_flag("filter")?;
 
         let transpose = !no_transpose;
@@ -351,10 +353,15 @@ impl PluginCommand for ToGuiCommand {
 
         let values: Vec<Value> = input.into_iter().collect();
         let closure_sources = crate::value_conv::collect_closure_sources_with_plugin_engine(&values, _engine);
-        let table = crate::value_conv::values_to_table_with_plugin_engine(&values, transpose, _engine);
+        let table = crate::value_conv::values_to_table_with_plugin_engine(
+            &values,
+            transpose,
+            _engine,
+            rfc3339,
+        );
 
         #[cfg(test)]
-        let _ = (&initial_filter, autosize, &save_dir, &table, &closure_sources);
+        let _ = (&initial_filter, autosize, &save_dir, &table, &closure_sources, rfc3339);
 
         #[cfg(not(test))]
         if let Err(err) = crate::gui::run_table_gui(
@@ -365,6 +372,7 @@ impl PluginCommand for ToGuiCommand {
             save_dir,
             closure_sources,
             (*nu_config).clone(),
+            rfc3339,
         ) {
             eprintln!("to-gui: GUI error: {:#?}", err);
         }

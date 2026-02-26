@@ -149,9 +149,15 @@ fn value_to_string_with_engine(
     engine: Option<&EngineInterface>,
     closure_sources: Option<&HashMap<usize, String>>,
     config: Option<&Config>,
+    rfc3339: bool,
 ) -> String {
     match v {
         Value::Date { .. } => {
+            if rfc3339 {
+                if let Value::Date { val, .. } = v {
+                    return val.to_rfc3339();
+                }
+            }
             if let Some(cfg) = config {
                 v.to_abbreviated_string(cfg)
             } else {
@@ -177,7 +183,7 @@ fn value_to_string_with_engine(
                     format!(
                         "{}: {}",
                         k,
-                        value_to_string_with_engine(v, engine, closure_sources, config)
+                        value_to_string_with_engine(v, engine, closure_sources, config, rfc3339)
                     )
                 })
                 .collect();
@@ -186,7 +192,7 @@ fn value_to_string_with_engine(
         Value::List { vals, .. } => {
             let elems: Vec<String> = vals
                 .iter()
-                .map(|v| value_to_string_with_engine(v, engine, closure_sources, config))
+                .map(|v| value_to_string_with_engine(v, engine, closure_sources, config, rfc3339))
                 .collect();
             format!("[{}]", elems.join(", "))
         }
@@ -221,14 +227,14 @@ fn value_to_string_with_engine(
 /// Convert a `Value` into a human-readable string for display in a table cell.
 #[allow(dead_code)]
 pub(crate) fn value_to_string(v: &Value) -> String {
-    value_to_string_with_engine(v, None, None, None)
+    value_to_string_with_engine(v, None, None, None, false)
 }
 
 /// Convert a `Value` into a display string with optional engine context.
 #[allow(dead_code)]
 pub(crate) fn value_to_string_with_plugin_engine(v: &Value, engine: &EngineInterface) -> String {
     let cfg = engine.get_config().ok();
-    value_to_string_with_engine(v, Some(engine), None, cfg.as_ref().map(|v| &**v))
+    value_to_string_with_engine(v, Some(engine), None, cfg.as_ref().map(|v| &**v), false)
 }
 
 fn collect_closure_sources(value: &Value, engine: &EngineInterface, out: &mut HashMap<usize, String>) {
@@ -278,13 +284,14 @@ pub fn collect_closure_sources_with_plugin_engine(
 /// * Other complex values are stringified via `Debug`.
 ///
 pub fn values_to_table(values: &[Value], transpose: bool) -> TableData {
-    values_to_table_with_engine(values, transpose, None, None, None)
+    values_to_table_with_engine(values, transpose, None, None, None, false)
 }
 
 pub fn values_to_table_with_plugin_engine(
     values: &[Value],
     transpose: bool,
     engine: &EngineInterface,
+    rfc3339: bool,
 ) -> TableData {
     let cfg = engine.get_config().ok();
     values_to_table_with_engine(
@@ -293,6 +300,7 @@ pub fn values_to_table_with_plugin_engine(
         Some(engine),
         None,
         cfg.as_ref().map(|v| &**v),
+        rfc3339,
     )
 }
 
@@ -301,7 +309,7 @@ pub fn values_to_table_with_closure_sources(
     transpose: bool,
     closure_sources: &HashMap<usize, String>,
 ) -> TableData {
-    values_to_table_with_engine(values, transpose, None, Some(closure_sources), None)
+    values_to_table_with_engine(values, transpose, None, Some(closure_sources), None, false)
 }
 
 pub fn values_to_table_with_closure_sources_and_config(
@@ -309,6 +317,7 @@ pub fn values_to_table_with_closure_sources_and_config(
     transpose: bool,
     closure_sources: &HashMap<usize, String>,
     config: &Config,
+    rfc3339: bool,
 ) -> TableData {
     values_to_table_with_engine(
         values,
@@ -316,6 +325,7 @@ pub fn values_to_table_with_closure_sources_and_config(
         None,
         Some(closure_sources),
         Some(config),
+        rfc3339,
     )
 }
 
@@ -325,6 +335,7 @@ fn values_to_table_with_engine(
     engine: Option<&EngineInterface>,
     closure_sources: Option<&HashMap<usize, String>>,
     config: Option<&Config>,
+    rfc3339: bool,
 ) -> TableData {
     // If requested, and we only have a single record at the top level, convert
     // it to a two‑column key/value table.  This is handy when people pipe a
@@ -337,7 +348,7 @@ fn values_to_table_with_engine(
                 let mut rows = Vec::new();
                 let mut raw_rows = Vec::new();
                 for (k, v) in rec.iter() {
-                    rows.push(vec![k.clone(), value_to_string_with_engine(v, engine, closure_sources, config)]);
+                    rows.push(vec![k.clone(), value_to_string_with_engine(v, engine, closure_sources, config, rfc3339)]);
                     raw_rows.push(vec![Value::string(k.clone(), Span::unknown()), v.clone()]);
                 }
                 return TableData::new(cols, rows, raw_rows);
@@ -392,7 +403,7 @@ fn values_to_table_with_engine(
                 let mut raw_row = Vec::with_capacity(cols_vec.len());
                 for key in &cols_vec {
                     if let Some(val) = rec.get(key.as_str()) {
-                        row.push(value_to_string_with_engine(val, engine, closure_sources, config));
+                        row.push(value_to_string_with_engine(val, engine, closure_sources, config, rfc3339));
                         raw_row.push(val.clone());
                     } else {
                         row.push(String::new());
@@ -403,7 +414,7 @@ fn values_to_table_with_engine(
                 raw_rows.push(raw_row);
             }
             other => {
-                rows.push(vec![value_to_string_with_engine(other, engine, closure_sources, config)]);
+                rows.push(vec![value_to_string_with_engine(other, engine, closure_sources, config, rfc3339)]);
                 raw_rows.push(vec![other.clone()]);
             }
         }

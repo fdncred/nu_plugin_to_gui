@@ -298,7 +298,7 @@ fn value_type_key(v: &Value) -> &'static str {
         Value::String { .. }   => "string",
         Value::Filesize { .. } => "filesize",
         Value::Duration { .. } => "duration",
-        Value::Date { .. }     => "date",
+        Value::Date { .. }     => "datetime",
         Value::Range { .. }    => "range",
         Value::Record { .. }   => "record",
         Value::List { .. }     => "list",
@@ -607,6 +607,8 @@ pub struct ToGuiView {
     closure_sources: Arc<HashMap<usize, String>>,
     /// Nushell runtime config used for display formatting (dates/filesizes/etc).
     table_config: Arc<Config>,
+    /// Whether datetime values should be rendered as RFC3339.
+    rfc3339: bool,
 }
 
 impl ToGuiView {
@@ -620,6 +622,7 @@ impl ToGuiView {
         save_dir: String,
         closure_sources: HashMap<usize, String>,
         table_config: Config,
+        rfc3339: bool,
     ) -> Self {
         let root_data = table_data.clone();
         let closure_sources = Arc::new(closure_sources);
@@ -633,6 +636,7 @@ impl ToGuiView {
             &color_config,
             closure_sources.clone(),
             table_config.clone(),
+            rfc3339,
         );
         ToGuiView {
             nav_stack: vec![(table_data, "root".into())],
@@ -645,6 +649,7 @@ impl ToGuiView {
             root_data,
             closure_sources,
             table_config,
+            rfc3339,
         }
     }
 
@@ -733,6 +738,7 @@ impl ToGuiView {
         cc: &ColorConfig,
         closure_sources: Arc<HashMap<usize, String>>,
         table_config: Arc<Config>,
+        rfc3339: bool,
     ) -> (
         Entity<InputState>,
         Entity<TableState<NushellTableDelegate>>,
@@ -832,6 +838,7 @@ impl ToGuiView {
                                     true,
                                     &closure_sources_c,
                                     &table_config_c,
+                                    rfc3339,
                                 );
                                 view.push_page(window, cx, nested, title, autosize_c, &cc_clone);
                             }
@@ -841,6 +848,7 @@ impl ToGuiView {
                                     true,
                                     &closure_sources_c,
                                     &table_config_c,
+                                    rfc3339,
                                 );
                                 view.push_page(window, cx, nested, title, autosize_c, &cc_clone);
                             }
@@ -873,6 +881,7 @@ impl ToGuiView {
             cc,
             self.closure_sources.clone(),
             self.table_config.clone(),
+            self.rfc3339,
         );
         self.filter_input = fi;
         self.table_state  = ts;
@@ -893,6 +902,7 @@ impl ToGuiView {
                 &cc,
                 self.closure_sources.clone(),
                 self.table_config.clone(),
+                self.rfc3339,
             );
             self.filter_input = fi;
             self.table_state  = ts;
@@ -1160,6 +1170,7 @@ fn ideal_window_size(table: &TableData, autosize: bool) -> Size<Pixels> {
     const EXTRA: f32 = 24.0;   // bottom padding / scrollbar
     const MARGIN_W: f32 = 32.0; // side padding / scrollbar
     const MIN_W: f32 = 400.0;
+    const MENUBAR_MIN_W: f32 = 640.0;
     const MAX_W: f32 = 1600.0;
     const MIN_H: f32 = 280.0;
     const MAX_H: f32 = 1024.0;
@@ -1179,7 +1190,7 @@ fn ideal_window_size(table: &TableData, autosize: bool) -> Size<Pixels> {
         }
     }).sum();
 
-    let width = (total_col_w + MARGIN_W).clamp(MIN_W, MAX_W);
+    let width = (total_col_w + MARGIN_W).clamp(MIN_W.max(MENUBAR_MIN_W), MAX_W);
     let height = (MENU_H + TOOLBAR_H + FILTER_H + HEADER_H
         + (table.rows.len() as f32) * ROW_H
         + EXTRA)
@@ -1202,6 +1213,7 @@ pub fn run_table_gui(
     save_dir: String,
     closure_sources: HashMap<usize, String>,
     table_config: Config,
+    rfc3339: bool,
 ) -> Result<()> {
     let app = Application::new().with_assets(gpui_component_assets::Assets);
 
@@ -1263,6 +1275,7 @@ pub fn run_table_gui(
         let save_dir2 = save_dir.clone();
         let closure_sources2 = closure_sources.clone();
         let table_config2 = table_config.clone();
+        let rfc3339_2 = rfc3339;
         cx.on_action::<SaveAction>(move |_, _app| {
             let json_rows: Vec<serde_json::Value> = ts.rows.iter()
                 .map(|row| {
@@ -1302,6 +1315,7 @@ pub fn run_table_gui(
                         save_dir,
                         closure_sources2,
                         table_config2,
+                        rfc3339_2,
                     )
                 });
                 cx.new(|cx| Root::new(view, window, cx))
@@ -1322,6 +1336,7 @@ pub fn run_table_gui(
     _save_dir: String,
     _closure_sources: HashMap<usize, String>,
     _table_config: Config,
+    _rfc3339: bool,
 ) -> anyhow::Result<()> {
     Ok(())
 }
@@ -1436,6 +1451,7 @@ mod tests {
             String::new(),
             HashMap::new(),
             Config::default(),
+            false,
         );
     }
 
