@@ -14,6 +14,7 @@ use gpui::*;
 use gpui_component::{Root, StyledExt};
 use gpui_component::table::{Table, TableDelegate, TableState, TableEvent, Column, ColumnSort};
 use gpui_component::input::{Input, InputState, InputEvent};
+use gpui_component::menu::{PopupMenu, PopupMenuItem};
 use std::collections::HashMap;
 use anyhow::Result;
 
@@ -87,10 +88,17 @@ pub struct NushellTableDelegate {
     filter: Option<String>,
     column_filters: Vec<Option<String>>,
     color_config: ColorConfig,
+    /// Per-column filter inputs rendered inside each column header.
+    column_filter_inputs: Vec<Entity<InputState>>,
 }
 
 impl NushellTableDelegate {
-    pub fn new(data: TableData, autosize: bool, color_config: ColorConfig) -> Self {
+    pub fn new(
+        data: TableData,
+        autosize: bool,
+        color_config: ColorConfig,
+        column_filter_inputs: Vec<Entity<InputState>>,
+    ) -> Self {
         let num_cols = data.columns.len();
         let count = data.rows.len();
         let mut columns: Vec<Column> = data
@@ -122,6 +130,7 @@ impl NushellTableDelegate {
             filter: None,
             column_filters: vec![None; num_cols],
             color_config,
+            column_filter_inputs,
         }
     }
 
@@ -219,11 +228,19 @@ impl TableDelegate for NushellTableDelegate {
         _cx: &mut Context<TableState<Self>>,
     ) -> impl gpui::IntoElement {
         let name = self.columns[col_ix].name.clone();
-        let mut el = gpui::div().v_flex().gap_1().child(name);
+        let mut header = gpui::div()
+            .v_flex()
+            .gap_1()
+            .w_full()
+            .child(name);
         if let Some(c) = self.color_config.header_color {
-            el = el.text_color(c);
+            header = header.text_color(c);
         }
-        el
+        // Embed the per-column filter input directly in the header cell.
+        if let Some(inp) = self.column_filter_inputs.get(col_ix) {
+            header = header.child(Input::new(inp));
+        }
+        header
     }
 
     fn render_td(
@@ -259,6 +276,26 @@ impl TableDelegate for NushellTableDelegate {
                 self.visible_rows = self.original_order.clone(),
         }
     }
+
+    fn context_menu(
+        &mut self,
+        row_ix: usize,
+        menu: PopupMenu,
+        _window: &mut Window,
+        _cx: &mut Context<TableState<Self>>,
+    ) -> PopupMenu {
+        let real_row = self.visible_rows.get(row_ix).copied().unwrap_or(row_ix);
+        // Copy all cells in the row joined by tabs — useful for pasting into spreadsheets.
+        let text = self.all_rows
+            .get(real_row)
+            .map(|r| r.join("\t"))
+            .unwrap_or_default();
+        menu.item(
+            PopupMenuItem::new("Copy Row").on_click(move |_, _, cx| {
+                cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
+            }),
+        )
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -270,7 +307,6 @@ pub struct ToGuiView {
     /// Navigation stack: (data, breadcrumb title)
     nav_stack: Vec<(TableData, String)>,
     filter_input: Entity<InputState>,
-    column_filter_inputs: Vec<Entity<InputState>>,
     table_state: Entity<TableState<NushellTableDelegate>>,
     autosize: bool,
     color_config: ColorConfig,
@@ -288,13 +324,12 @@ impl ToGuiView {
         color_config: ColorConfig,
     ) -> Self {
         let root_data = table_data.clone();
-        let (fi, cfi, ts) = Self::build_page(
+        let (fi, ts) = Self::build_page(
             window, cx, &table_data, initial_filter, autosize, &color_config,
         );
         ToGuiView {
             nav_stack: vec![(table_data, "root".into())],
             filter_input: fi,
-            column_filter_inputs: cfi,
             table_state: ts,
             autosize,
             color_config,
@@ -312,15 +347,16 @@ impl ToGuiView {
         cc: &ColorConfig,
     ) -> (
         Entity<InputState>,
-        Vec<Entity<InputState>>,
         Entity<TableState<NushellTableDelegate>>,
     ) {
-        // Per-column filter inputs
+        // Per-column filter inputs — owned by the delegate, rendered inside headers.
         let col_inputs: Vec<Entity<InputState>> = (0..data.columns.len())
             .map(|_| cx.new(|cx| InputState::new(window, cx)))
             .collect();
+        // Keep a clone for subscriptions; the originals move into the delegate.
+        let col_inputs_for_subs = col_inputs.clone();
 
-        let delegate = NushellTableDelegate::new(data.clone(), autosize, cc.clone());
+        let delegate = NushellTableDelegate::new(data.clone(), autosize, cc.clone(), col_inputs);
 
         let ts = cx.new(|cx| {
             TableState::new(delegate, window, cx)
@@ -345,7 +381,7 @@ impl ToGuiView {
         }).detach();
 
         // Per-column filter subscriptions
-        for (col_ix, inp) in col_inputs.iter().enumerate() {
+        for (col_ix, inp) in col_inputs_for_subs.iter().enumerate() {
             let ts3 = ts.clone();
             cx.subscribe_in(inp, window, move |_v, input, event, _, cx| {
                 if let InputEvent::Change = event {
@@ -385,37 +421,50 @@ impl ToGuiView {
                     .copied()
                     .unwrap_or(row_ix);
 
-                let raw_val = data_clone
-                    .raw
-                    .get(real_row)
-                    .and_then(|r| r.get(col_ix))
-                    .cloned();
-
-                if let Some(raw) = raw_val {
-                    let col_name = data_clone
-                        .columns
-                        .get(col_ix)
-                        .map_or("?", |s| s.as_str());
-                    let title = format!("row[{}].{}", real_row, col_name);
-
-                    match &raw {
-                        Value::Record { .. } => {
-                            let nested = crate::value_conv::values_to_table(&[raw], true);
-                            view.push_page(window, cx, nested, title, autosize_c, &cc_clone.clone());
-                        }
-                        Value::List { vals, .. } => {
-                            if !vals.is_empty() {
-                                let nested = crate::value_conv::values_to_table(vals, true);
-                                view.push_page(window, cx, nested, title, autosize_c, &cc_clone.clone());
+                // Try to navigate into the selected column's cell first.
+                let navigated = if let Some(raw_row) = data_clone.raw.get(real_row) {
+                    if let Some(raw) = raw_row.get(col_ix).cloned() {
+                        let col_name = data_clone.columns.get(col_ix).map_or("?", |s| s.as_str());
+                        let title = format!("row[{}].{}", real_row, col_name);
+                        match &raw {
+                            Value::Record { .. } => {
+                                let nested = crate::value_conv::values_to_table(&[raw.clone()], true);
+                                view.push_page(window, cx, nested, title, autosize_c, &cc_clone);
+                                true
                             }
+                            Value::List { vals, .. } if !vals.is_empty() => {
+                                let nested = crate::value_conv::values_to_table(vals, true);
+                                view.push_page(window, cx, nested, title, autosize_c, &cc_clone);
+                                true
+                            }
+                            _ => false,
                         }
-                        _ => {}
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                };
+
+                // Fallback: build a record from the whole row and navigate into it.
+                // This lets users double-click any row (e.g. an `ls` result) to see
+                // all fields in a transposed key/value view.
+                if !navigated {
+                    if let Some(raw_row) = data_clone.raw.get(real_row) {
+                        let mut rec = nu_protocol::Record::new();
+                        for (col_name, val) in data_clone.columns.iter().zip(raw_row.iter()) {
+                            rec.push(col_name.clone(), val.clone());
+                        }
+                        let row_val = Value::record(rec, nu_protocol::Span::unknown());
+                        let nested = crate::value_conv::values_to_table(&[row_val], true);
+                        let title = format!("row[{}]", real_row);
+                        view.push_page(window, cx, nested, title, autosize_c, &cc_clone);
                     }
                 }
             }
         }).detach();
 
-        (fi, col_inputs, ts)
+        (fi, ts)
     }
 
     fn push_page(
@@ -428,10 +477,9 @@ impl ToGuiView {
         cc: &ColorConfig,
     ) {
         self.nav_stack.push((data.clone(), title));
-        let (fi, cfi, ts) = Self::build_page(window, cx, &data, None, autosize, cc);
-        self.filter_input        = fi;
-        self.column_filter_inputs = cfi;
-        self.table_state         = ts;
+        let (fi, ts) = Self::build_page(window, cx, &data, None, autosize, cc);
+        self.filter_input = fi;
+        self.table_state  = ts;
         cx.notify();
     }
 
@@ -440,10 +488,9 @@ impl ToGuiView {
             self.nav_stack.pop();
             let (data, _) = self.nav_stack.last().unwrap().clone();
             let cc = self.color_config.clone();
-            let (fi, cfi, ts) = Self::build_page(window, cx, &data, None, self.autosize, &cc);
-            self.filter_input        = fi;
-            self.column_filter_inputs = cfi;
-            self.table_state         = ts;
+            let (fi, ts) = Self::build_page(window, cx, &data, None, self.autosize, &cc);
+            self.filter_input = fi;
+            self.table_state  = ts;
             cx.notify();
         }
     }
@@ -503,16 +550,32 @@ impl Render for ToGuiView {
                     .cursor_pointer()
                     .on_click(move |_, _window, cx| {
                         weak2.update(cx, |view, _cx| {
-                            if let Ok(json) = serde_json::to_string_pretty(&view.root_data) {
-                                let _ = std::fs::write("to-gui-output.json", json);
+                            let data = &view.root_data;
+                            // Serialize as a JSON array of objects (string values only).
+                            let json_rows: Vec<serde_json::Value> = data.rows.iter()
+                                .map(|row| {
+                                    let obj: serde_json::Map<String, serde_json::Value> =
+                                        data.columns.iter()
+                                            .zip(row.iter())
+                                            .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
+                                            .collect();
+                                    serde_json::Value::Object(obj)
+                                })
+                                .collect();
+                            if let Ok(json) = serde_json::to_string_pretty(&json_rows) {
+                                // Write to the system temp directory so we always have permission.
+                                let path = std::env::temp_dir().join("to-gui-output.json");
+                                match std::fs::write(&path, &json) {
+                                    Ok(_) => eprintln!("to-gui: saved to {}", path.display()),
+                                    Err(e) => eprintln!("to-gui: save failed: {}", e),
+                                }
                             }
                         }).ok();
                     })
                     .child("💾 Save"),
             );
 
-        // Global search + per-column filter row
-        let num_cols = self.table_state.read(cx).delegate().columns.len();
+        // Global search bar
         let filter_row = gpui::div()
             .h_flex()
             .gap_1()
@@ -526,17 +589,6 @@ impl Render for ToGuiView {
                     .flex_shrink_0()
                     .w_40()
                     .child(Input::new(&self.filter_input)),
-            )
-            .children(
-                (0..num_cols).filter_map(|i| {
-                    self.column_filter_inputs.get(i).map(|inp| {
-                        gpui::div()
-                            .flex_1()
-                            .min_w_16()
-                            .child(Input::new(inp))
-                            .into_any_element()
-                    })
-                }),
             );
 
         gpui::div()
@@ -566,8 +618,8 @@ impl Render for ToGuiView {
 /// never tiny or larger than a standard monitor.
 fn ideal_window_size(table: &TableData, autosize: bool) -> Size<Pixels> {
     const ROW_H: f32 = 36.0;   // data row
-    const HEADER_H: f32 = 42.0; // column header row
-    const FILTER_H: f32 = 48.0; // filter-input row
+    const HEADER_H: f32 = 70.0; // column header row (includes embedded filter input)
+    const FILTER_H: f32 = 42.0; // global-filter bar
     const TOOLBAR_H: f32 = 42.0;
     const EXTRA: f32 = 24.0;   // bottom padding / scrollbar
     const MARGIN_W: f32 = 32.0; // side padding / scrollbar
@@ -637,8 +689,20 @@ pub fn run_table_gui(
 
         let ts = table.clone();
         cx.on_action::<SaveAction>(move |_, _app| {
-            if let Ok(json) = serde_json::to_string_pretty(&ts) {
-                let _ = std::fs::write("to-gui-output.json", json);
+            let json_rows: Vec<serde_json::Value> = ts.rows.iter()
+                .map(|row| {
+                    let obj: serde_json::Map<String, serde_json::Value> =
+                        ts.columns.iter()
+                            .zip(row.iter())
+                            .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
+                            .collect();
+                    serde_json::Value::Object(obj)
+                })
+                .collect();
+            if let Ok(json) = serde_json::to_string_pretty(&json_rows) {
+                let path = std::env::temp_dir().join("to-gui-output.json");
+                let _ = std::fs::write(&path, json);
+                eprintln!("to-gui: saved to {}", path.display());
             }
         });
 

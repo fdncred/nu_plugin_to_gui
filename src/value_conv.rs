@@ -1,7 +1,7 @@
 //! Conversion utilities for turning Nushell `Value`/`PipelineData` into
 //! `TableData` suitable for display.
 
-use nu_protocol::{Value, Span};
+use nu_protocol::{Config, Value, Span};
 use crate::TableData;
 use std::collections::BTreeSet;
 
@@ -26,9 +26,10 @@ pub(crate) fn value_to_string(v: &Value) -> String {
             let elems: Vec<String> = vals.iter().map(value_to_string).collect();
             format!("[{}]", elems.join(", "))
         }
+        // Closures: display as `closure_<block_id>` instead of raw JSON.
+        Value::Closure { .. } => v.to_expanded_string(", ", &Config::default()),
         _ => {
-            // some values (closures, errors, etc.) look nicer when
-            // serialized the same way `to json --serialize` does.
+            // other values (errors, etc.) serialized the same way `to json --serialize` does.
             if let Ok(json) = serde_json::to_string(v) {
                 json
             } else {
