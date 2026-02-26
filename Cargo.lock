@@ -4059,6 +4059,7 @@ dependencies = [
 [[package]]
 name = "nu-color-config"
 version = "0.110.1"
+source = "git+https://github.com/nushell/nushell?branch=main#0958d6b82adef83c907f671ed0e2598245bffe64"
 dependencies = [
  "nu-ansi-term",
  "nu-engine",
@@ -4070,6 +4071,7 @@ dependencies = [
 [[package]]
 name = "nu-derive-value"
 version = "0.110.1"
+source = "git+https://github.com/nushell/nushell?branch=main#0958d6b82adef83c907f671ed0e2598245bffe64"
 dependencies = [
  "heck 0.5.0",
  "proc-macro-error2",
@@ -4081,6 +4083,7 @@ dependencies = [
 [[package]]
 name = "nu-engine"
 version = "0.110.1"
+source = "git+https://github.com/nushell/nushell?branch=main#0958d6b82adef83c907f671ed0e2598245bffe64"
 dependencies = [
  "fancy-regex",
  "log",
@@ -4094,6 +4097,7 @@ dependencies = [
 [[package]]
 name = "nu-experimental"
 version = "0.110.1"
+source = "git+https://github.com/nushell/nushell?branch=main#0958d6b82adef83c907f671ed0e2598245bffe64"
 dependencies = [
  "itertools 0.14.0",
  "thiserror 2.0.18",
@@ -4102,10 +4106,12 @@ dependencies = [
 [[package]]
 name = "nu-glob"
 version = "0.110.1"
+source = "git+https://github.com/nushell/nushell?branch=main#0958d6b82adef83c907f671ed0e2598245bffe64"
 
 [[package]]
 name = "nu-json"
 version = "0.110.1"
+source = "git+https://github.com/nushell/nushell?branch=main#0958d6b82adef83c907f671ed0e2598245bffe64"
 dependencies = [
  "linked-hash-map",
  "nu-utils",
@@ -4117,6 +4123,7 @@ dependencies = [
 [[package]]
 name = "nu-path"
 version = "0.110.1"
+source = "git+https://github.com/nushell/nushell?branch=main#0958d6b82adef83c907f671ed0e2598245bffe64"
 dependencies = [
  "dirs 6.0.0",
  "omnipath",
@@ -4127,6 +4134,7 @@ dependencies = [
 [[package]]
 name = "nu-plugin"
 version = "0.110.1"
+source = "git+https://github.com/nushell/nushell?branch=main#0958d6b82adef83c907f671ed0e2598245bffe64"
 dependencies = [
  "log",
  "nix 0.30.1",
@@ -4141,6 +4149,7 @@ dependencies = [
 [[package]]
 name = "nu-plugin-core"
 version = "0.110.1"
+source = "git+https://github.com/nushell/nushell?branch=main#0958d6b82adef83c907f671ed0e2598245bffe64"
 dependencies = [
  "interprocess",
  "log",
@@ -4155,6 +4164,7 @@ dependencies = [
 [[package]]
 name = "nu-plugin-protocol"
 version = "0.110.1"
+source = "git+https://github.com/nushell/nushell?branch=main#0958d6b82adef83c907f671ed0e2598245bffe64"
 dependencies = [
  "nu-protocol",
  "nu-utils",
@@ -4167,6 +4177,7 @@ dependencies = [
 [[package]]
 name = "nu-protocol"
 version = "0.110.1"
+source = "git+https://github.com/nushell/nushell?branch=main#0958d6b82adef83c907f671ed0e2598245bffe64"
 dependencies = [
  "brotli",
  "bytes",
@@ -4205,6 +4216,7 @@ dependencies = [
 [[package]]
 name = "nu-system"
 version = "0.110.1"
+source = "git+https://github.com/nushell/nushell?branch=main#0958d6b82adef83c907f671ed0e2598245bffe64"
 dependencies = [
  "chrono",
  "itertools 0.14.0",
@@ -4224,6 +4236,7 @@ dependencies = [
 [[package]]
 name = "nu-utils"
 version = "0.110.1"
+source = "git+https://github.com/nushell/nushell?branch=main#0958d6b82adef83c907f671ed0e2598245bffe64"
 dependencies = [
  "byteyarn",
  "crossterm",
