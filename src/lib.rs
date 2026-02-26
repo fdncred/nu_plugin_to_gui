@@ -6,51 +6,132 @@
 //! `src/main.rs` when run as a plugin binary.  Keeping most logic in a
 //! library makes it easier to test.
 
+// The GUI module uses deeply-nested GPUI generic types that cause rustc to
+// overflow its stack when compiling in test mode.  Gate it behind cfg(not(test))
+// and expose a minimal stub for the types the rest of lib.rs depends on.
+#[cfg(not(test))]
 pub mod gui;
 pub mod value_conv;
 
+#[cfg(not(test))]
+use gui::ColorConfig;
+
+// Stub ColorConfig used during unit tests so the gui module is not compiled.
+#[cfg(test)]
+#[derive(Clone, Default)]
+pub struct ColorConfig {
+    pub type_colors: std::collections::HashMap<String, gpui::Rgba>,
+    pub header_color: Option<gpui::Rgba>,
+}
+
 use nu_plugin::{Plugin, PluginCommand, EvaluatedCall, EngineInterface};
 use nu_protocol::{Value, LabeledError, PipelineData, Signature, SyntaxShape};
-// colors will be represented as gpui::Fill so they can be applied to elements
 use gpui::Rgba;
+use std::collections::HashMap;
 
-/// Try to parse a simple hex color string like `#rrggbb` or `rrggbb`.
+/// Parse a color string used in nushell's `color_config` into a `gpui::Rgba`.
 ///
-/// Returns a `gpui::Fill` containing the parsed color.  We choose `Fill` since
-/// most styling methods on elements accept a `Fill` and there is an
-/// `impl From<Rgba> for Fill` to perform the conversion.
-fn parse_color(s: &str) -> Option<Rgba> {
+/// Supported formats:
+/// * `#rrggbb` or `rrggbb` — standard 6-digit hex
+/// * Named ANSI colors: `black`, `dark_gray`, `red`, `light_red`, `green`,
+///   `light_green`, `yellow`, `light_yellow`, `blue`, `light_blue`,
+///   `purple`, `light_purple`, `magenta`, `light_magenta`, `cyan`,
+///   `light_cyan`, `white`, `light_gray`
+/// * Short names used by nushell: `r`, `g`, `b`, `u`, `y`, `p`, `c`, `w`, etc.
+/// * Style suffixes like `_bold`, `_italic`, `_underline` are stripped before
+///   the color name is looked up.
+pub fn parse_color(s: &str) -> Option<Rgba> {
     let trimmed = s.trim();
-    // strip off style hints like "_bold" or "_underlined" by taking prefix
-    let mut key = trimmed;
-    if let Some(idx) = trimmed.find('_') {
-        key = &trimmed[..idx];
-    }
 
-    // first try hex format
-    let hex = key.trim_start_matches('#');
-    if hex.len() == 6 {
-        if let Ok(v) = u32::from_str_radix(hex, 16) {
-            let r = ((v >> 16) & 0xff) as u8;
-            let g = ((v >> 8) & 0xff) as u8;
-            let b = (v & 0xff) as u8;
-            // gpui::rgb returns an Rgba color
-            return Some(gpui::rgb((r as u32) << 16 | (g as u32) << 8 | (b as u32)));
+    // Strip style suffixes: e.g. "green_bold" → "green"
+    // Nushell uses `name_attr` notation; split on first `_`.
+    // But some names themselves contain `_` (e.g. `light_red`) so we try the
+    // full string first, then progressively trim the suffix.
+    if let Some(c) = parse_color_name(trimmed) {
+        return Some(c);
+    }
+    // Try stripping the last `_`-delimited segment
+    let mut base = trimmed;
+    while let Some(pos) = base.rfind('_') {
+        base = &base[..pos];
+        if let Some(c) = parse_color_name(base) {
+            return Some(c);
+        }
+    }
+    None
+}
+
+fn parse_color_name(s: &str) -> Option<Rgba> {
+    let s = s.trim().trim_start_matches('#');
+
+    // Hex: exactly 6 hex digits
+    if s.len() == 6 && s.chars().all(|c| c.is_ascii_hexdigit()) {
+        if let Ok(v) = u32::from_str_radix(s, 16) {
+            return Some(gpui::rgb(v));
         }
     }
 
-    // simple named colors
-    match key.to_lowercase().as_str() {
-        "black" => Some(gpui::rgb(0x000000)),
-        "white" => Some(gpui::rgb(0xffffff)),
-        "red" => Some(gpui::rgb(0xff0000)),
-        "green" => Some(gpui::rgb(0x00ff00)),
-        "blue" => Some(gpui::rgb(0x0000ff)),
-        "yellow" => Some(gpui::rgb(0xffff00)),
-        "cyan" => Some(gpui::rgb(0x00ffff)),
-        "magenta" => Some(gpui::rgb(0xff00ff)),
-        _ => None,
+    // Named colors as used by nushell (nu_ansi_term names)
+    match s.to_lowercase().as_str() {
+        // short codes
+        "b" | "black"         => Some(gpui::rgb(0x000000)),
+        "dgr" | "dark_gray"   => Some(gpui::rgb(0x808080)),
+        "r" | "red"           => Some(gpui::rgb(0x800000)),
+        "lr" | "light_red"    => Some(gpui::rgb(0xff0000)),
+        "g" | "green"         => Some(gpui::rgb(0x008000)),
+        "lg" | "light_green"  => Some(gpui::rgb(0x00ff00)),
+        "y" | "yellow"        => Some(gpui::rgb(0x808000)),
+        "ly" | "light_yellow" => Some(gpui::rgb(0xffff00)),
+        "u" | "blue"          => Some(gpui::rgb(0x000080)),
+        "lu" | "light_blue"   => Some(gpui::rgb(0x0000ff)),
+        "p" | "purple"        => Some(gpui::rgb(0x800080)),
+        "lp" | "light_purple" => Some(gpui::rgb(0xff00ff)),
+        "m" | "magenta"       => Some(gpui::rgb(0x800080)),
+        "lm" | "light_magenta" => Some(gpui::rgb(0xff00ff)),
+        "c" | "cyan"          => Some(gpui::rgb(0x008080)),
+        "lc" | "light_cyan"   => Some(gpui::rgb(0x00ffff)),
+        "w" | "white"         => Some(gpui::rgb(0xc0c0c0)),
+        "ligr" | "light_gray" => Some(gpui::rgb(0xd3d3d3)),
+        "default"             => None,
+        _                     => None,
     }
+}
+
+/// Extract a `ColorConfig` from a nushell `color_config` `HashMap<String, Value>`.
+///
+/// Each value in the map may be:
+/// * `Value::String` — a color string (hex or named) or short code
+/// * `Value::Record { fg, bg, attr }` — only `fg` is used for cell color
+///
+/// Keys are the nushell value type names (`"int"`, `"float"`, `"string"`, …)
+/// plus `"header"` for column headers.
+pub fn color_config_from_map(map: &HashMap<String, Value>) -> ColorConfig {
+    let mut type_colors: HashMap<String, Rgba> = HashMap::new();
+    let mut header_color: Option<Rgba> = None;
+
+    for (key, value) in map {
+        let color = match value {
+            Value::String { val, .. } => parse_color(val),
+            Value::Record { val: rec, .. } => {
+                // Look for the `fg` field
+                rec.as_ref()
+                    .get("fg")
+                    .and_then(|v| if let Value::String { val, .. } = v { Some(val) } else { None })
+                    .and_then(|s| parse_color(s))
+            }
+            _ => None,
+        };
+
+        if let Some(rgba) = color {
+            if key == "header" {
+                header_color = Some(rgba);
+            } else {
+                type_colors.insert(key.clone(), rgba);
+            }
+        }
+    }
+
+    ColorConfig { type_colors, header_color }
 }
 
 /// The plugin type returned to Nushell.
@@ -104,48 +185,20 @@ impl PluginCommand for ToGuiCommand {
         let transpose = !no_transpose;
         let autosize = !no_autosize;
 
-        // color configuration from environment or shell config
-        // first give precedence to explicit environment variables, then try
-        // to read a couple of sensible entries out of `$env.config.color_config`.
-        let mut fg: Option<Rgba> = std::env::var("NU_COLOR_FG").ok().and_then(|s| parse_color(&s));
-        let mut bg: Option<Rgba> = std::env::var("NU_COLOR_BG").ok().and_then(|s| parse_color(&s));
-
-        if fg.is_none() || bg.is_none() {
-            if let Ok(cfg) = _engine.get_config() {
-                // convert to json so we can look up arbitrary keys without
-                // having to know the exact struct definition.
-                if let Ok(json) = serde_json::to_value(&*cfg) {
-                    if let Some(cc) = json.get("color_config") {
-                        if let Some(map) = cc.as_object() {
-                            if fg.is_none() {
-                                if let Some(val) = map.get("header") {
-                                    if let Some(s) = val.as_str() {
-                                        fg = parse_color(s);
-                                    }
-                                }
-                            }
-                            if bg.is_none() {
-                                if let Some(val) = map.get("empty") {
-                                    if let Some(s) = val.as_str() {
-                                        bg = parse_color(s);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // supply harmless defaults so that the table isn't plain black/white
-        // when no configuration is provided.
-        let fg = fg.or(Some(gpui::rgb(0x000080))); // navy
-        let bg = bg.or(Some(gpui::rgb(0xf0f8ff))); // alice blue
+        // Build color configuration from $env.config.color_config.
+        // `Config::color_config` is a HashMap<String, Value> that maps nushell
+        // value-type names (e.g. "int", "float", "string", "header") to either
+        // a color name string or a record with fg/bg/attr fields.
+        let color_config = _engine
+            .get_config()
+            .map(|cfg| color_config_from_map(&cfg.color_config))
+            .unwrap_or_default();
 
         let values: Vec<Value> = input.into_iter().collect();
         let table = crate::value_conv::values_to_table(&values, transpose);
 
-        if let Err(err) = crate::gui::run_table_gui(table, initial_filter, autosize, fg, bg) {
+        #[cfg(not(test))]
+        if let Err(err) = crate::gui::run_table_gui(table, initial_filter, autosize, color_config) {
             eprintln!("to-gui: GUI error: {:#?}", err);
         }
 
@@ -189,10 +242,14 @@ mod tests {
 
     #[test]
     fn parse_color_names() {
-        assert_eq!(parse_color("red"), Some(gpui::rgb(0xff0000)));
-        assert_eq!(parse_color("Blue"), Some(gpui::rgb(0x0000ff)));
-        assert_eq!(parse_color("green_bold"), Some(gpui::rgb(0x00ff00)));
-        assert_eq!(parse_color("yellow_underlined"), Some(gpui::rgb(0xffff00)));
+        // nushell ANSI color names: "red" is dark red (0x800000), not bright
+        assert_eq!(parse_color("red"), Some(gpui::rgb(0x800000)));
+        // "blue" is dark blue in ANSI
+        assert_eq!(parse_color("Blue"), Some(gpui::rgb(0x000080)));
+        // "green_bold" strips "_bold" suffix → "green" which is dark green
+        assert_eq!(parse_color("green_bold"), Some(gpui::rgb(0x008000)));
+        // "yellow_underlined" strips "_underlined" → "yellow" which is dark yellow
+        assert_eq!(parse_color("yellow_underlined"), Some(gpui::rgb(0x808000)));
         assert_eq!(parse_color("unknowncolor"), None);
     }
 }

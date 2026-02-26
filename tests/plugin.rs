@@ -1,49 +1,37 @@
-use nu_protocol::engine::EngineState;
-use nu_plugin::EvaluatedCall;
 use nu_plugin::PluginCommand;
-use nu_protocol::{Span, PipelineData, Value};
 
 use nu_plugin_to_gui::{ToGuiCommand, ToGuiPlugin};
 
+// Note: `PluginCommand::run` requires a real `EngineInterface` which cannot be
+// constructed in a unit-test context.  These tests therefore verify the
+// command's metadata (name, description, signature) without invoking `run`.
+
 #[test]
-fn command_returns_empty_output() {
-    let plugin = ToGuiPlugin;
+fn command_name_is_to_gui() {
     let command = ToGuiCommand;
-    let engine = EngineState::new();
-    let call = EvaluatedCall::new(Span::unknown());
-
-    // we don't need actual table data for the smoke test; an empty stream is enough
-    let input = PipelineData::empty();
-
-    let result = command.run(&plugin, &engine, &call, input).expect("run failed");
-    assert!(result.is_empty());
+    assert_eq!(command.name(), "to-gui");
 }
 
 #[test]
-fn parsing_flags_doesnt_crash() {
-    use nu_protocol::IntoSpanned;
-
-    let plugin = ToGuiPlugin;
+fn command_has_description() {
     let command = ToGuiCommand;
-    let engine = EngineState::new();
-    let mut call = EvaluatedCall::new(Span::unknown());
-    call.add_flag("no-transpose".into_spanned(Span::unknown()));
-    call.add_flag("no-autosize".into_spanned(Span::unknown()));
-    call.add_named("filter".into_spanned(Span::unknown()), Value::string("foo", Span::unknown()));
-
-    let input = PipelineData::empty();
-    let result = command.run(&plugin, &engine, &call, input).expect("run failed");
-    assert!(result.is_empty());
+    assert!(!command.description().is_empty());
 }
 
 #[test]
-fn default_autosize_true() {
-    let plugin = ToGuiPlugin;
+fn signature_has_expected_flags() {
     let command = ToGuiCommand;
-    let engine = EngineState::new();
-    let call = EvaluatedCall::new(Span::unknown());
-    let input = PipelineData::empty();
-    // no flags means autosize should be enabled by default - just verify nothing panics
-    let result = command.run(&plugin, &engine, &call, input).expect("run failed");
-    assert!(result.is_empty());
+    let sig = command.signature();
+    let flag_names: Vec<&str> = sig.named.iter().map(|f| f.long.as_str()).collect();
+    assert!(flag_names.contains(&"no-transpose"), "missing --no-transpose flag");
+    assert!(flag_names.contains(&"no-autosize"),  "missing --no-autosize flag");
+    assert!(flag_names.contains(&"filter"),        "missing --filter flag");
+}
+
+#[test]
+fn plugin_exposes_one_command() {
+    use nu_plugin::Plugin;
+    let plugin = ToGuiPlugin;
+    assert_eq!(plugin.commands().len(), 1);
+    assert_eq!(plugin.commands()[0].name(), "to-gui");
 }

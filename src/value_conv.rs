@@ -5,6 +5,39 @@ use nu_protocol::{Value, Span};
 use crate::TableData;
 use std::collections::BTreeSet;
 
+/// Convert a `Value` into a human-readable string for display in a table cell.
+pub(crate) fn value_to_string(v: &Value) -> String {
+    match v {
+        Value::String { val, .. } => val.clone(),
+        Value::Int { val, .. } => val.to_string(),
+        Value::Float { val, .. } => val.to_string(),
+        Value::Bool { val, .. } => val.to_string(),
+        Value::Date { val, .. } => val.to_string(),
+        Value::Filesize { val, .. } => val.to_string(),
+        Value::Record { val: rec, .. } => {
+            let pairs: Vec<String> = rec
+                .as_ref()
+                .iter()
+                .map(|(k, v)| format!("{}: {}", k, value_to_string(v)))
+                .collect();
+            format!("{{{}}}", pairs.join(", "))
+        }
+        Value::List { vals, .. } => {
+            let elems: Vec<String> = vals.iter().map(value_to_string).collect();
+            format!("[{}]", elems.join(", "))
+        }
+        _ => {
+            // some values (closures, errors, etc.) look nicer when
+            // serialized the same way `to json --serialize` does.
+            if let Ok(json) = serde_json::to_string(v) {
+                json
+            } else {
+                format!("{:?}", v)
+            }
+        },
+    }
+}
+
 /// Convert a slice of `Value` into a tabular representation.
 ///
 /// Rules:
@@ -15,39 +48,6 @@ use std::collections::BTreeSet;
 /// * Other complex values are stringified via `Debug`.
 ///
 pub fn values_to_table(values: &[Value], transpose: bool) -> TableData {
-    // helper that turns any scalar/complex value into a string for our table.
-    fn value_to_string(v: &Value) -> String {
-        match v {
-            Value::String { val, .. } => val.clone(),
-            Value::Int { val, .. } => val.to_string(),
-            Value::Float { val, .. } => val.to_string(),
-            Value::Bool { val, .. } => val.to_string(),
-            Value::Date { val, .. } => val.to_string(),
-            Value::Filesize { val, .. } => val.to_string(),
-            Value::Record { val: rec, .. } => {
-                let pairs: Vec<String> = rec
-                    .as_ref()
-                    .iter()
-                    .map(|(k, v)| format!("{}: {}", k, value_to_string(v)))
-                    .collect();
-                format!("{{{}}}", pairs.join(", "))
-            }
-            Value::List { vals, .. } => {
-                let elems: Vec<String> = vals.iter().map(value_to_string).collect();
-                format!("[{}]", elems.join(", "))
-            }
-            _ => {
-                // some values (closures, errors, etc.) look nicer when
-                // serialized the same way `to json --serialize` does.
-                if let Ok(json) = serde_json::to_string(v) {
-                    json
-                } else {
-                    format!("{:?}", v)
-                }
-            },
-        }
-    }
-
     // If requested, and we only have a single record at the top level, convert
     // it to a two‑column key/value table.  This is handy when people pipe a
     // lone record into `to-gui` and expect to see the fields laid out as rows.
@@ -133,12 +133,14 @@ pub fn values_to_table(values: &[Value], transpose: bool) -> TableData {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nu_protocol::{Value, Span};
+    use nu_protocol::{Value, Span, Record};
 
     fn make_record(pairs: &[(&str, Value)]) -> Value {
-        let cols: Vec<String> = pairs.iter().map(|(k, _)| k.to_string()).collect();
-        let vals: Vec<Value> = pairs.iter().map(|(_, v)| v.clone()).collect();
-        Value::record(cols, vals, Span::unknown())
+        let mut rec = Record::new();
+        for (k, v) in pairs {
+            rec.push(k.to_string(), v.clone());
+        }
+        Value::record(rec, Span::unknown())
     }
 
     #[test]
@@ -156,12 +158,9 @@ mod tests {
     fn date_and_filesize_stringify_nicely() {
         // we don't need a full ISO parser here; just ensure we don't get
         // the debug struct output that was reported by the user.
-        let dt = Value::Date {
-            val: chrono::Utc::now(),
-            span: Span::unknown(),
-        };
-        let fs = Value::Filesize { val: 12345, span: Span::unknown() };
-        
+        let dt = Value::date(chrono::Utc::now().fixed_offset(), Span::unknown());
+        let fs = Value::filesize(12345i64, Span::unknown());
+
         let table = values_to_table(&[dt.clone(), fs.clone()], false);
         assert_eq!(table.columns, vec!["value".to_string()]);
         // both rows should not contain the word "Date {" or "Filesize {";
@@ -177,7 +176,7 @@ mod tests {
                                ("b", Value::string("x", Span::unknown()))]);
         let r2 = make_record(&[("b", Value::string("y", Span::unknown())),
                                ("c", Value::int(2, Span::unknown()))]);
-        let table = values_to_table(&[r1, r2]);
+        let table = values_to_table(&[r1, r2], false);
         assert_eq!(table.columns, vec!["a", "b", "c"]);
         assert_eq!(table.rows.len(), 2);
         assert_eq!(table.rows[0], vec!["1".to_string(), "x".to_string(), "".to_string()]);
@@ -215,11 +214,14 @@ mod tests {
 
     #[test]
     fn nested_structures_are_stringified() {
-        let nest = Value::list(
-            vec![Value::record(vec!["x".to_string()], vec![Value::int(5, Span::unknown())], Span::unknown())],
-            Span::unknown(),
-        );
-        let table = values_to_table(&[nest], false);
+        // A record with a list-valued field: cell should be stringified "[...]"
+        let mut inner_rec = Record::new();
+        inner_rec.push("x".to_string(), Value::int(5, Span::unknown()));
+        let cell_list = Value::list(vec![Value::record(inner_rec, Span::unknown())], Span::unknown());
+        let mut row_rec = Record::new();
+        row_rec.push("items".to_string(), cell_list);
+        let table = values_to_table(&[Value::record(row_rec, Span::unknown())], false);
+        // "items" column cell should be the stringified list
         assert!(table.rows[0][0].starts_with("["));
         assert!(table.rows[0][0].contains("x: 5"));
     }
@@ -228,14 +230,14 @@ mod tests {
     fn fallback_serializes_unhandled_values() {
         use nu_protocol::ShellError;
         // Create an error value which isn't specially handled in `value_to_string`.
-        let err = Value::error(ShellError::GenericError {
+        let err_val = ShellError::GenericError {
             error: "bad".into(),
             msg: "bad".into(),
-            span: Span::unknown(),
+            span: None,
             help: None,
-            label: None,
-            filename: None,
-        });
+            inner: vec![],
+        };
+        let err = Value::error(err_val, Span::unknown());
         let s = value_to_string(&err);
         // should begin with a JSON object rather than the debug variant
         assert!(s.trim_start().starts_with('{'));
