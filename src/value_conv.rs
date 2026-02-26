@@ -1,12 +1,106 @@
 //! Conversion utilities for turning Nushell `Value`/`PipelineData` into
 //! `TableData` suitable for display.
 
-use nu_protocol::{Config, Value, Span};
+use nu_protocol::{Config, Value, Span, ast::PathMember};
+use nu_plugin::EngineInterface;
 use crate::TableData;
 use std::collections::BTreeSet;
 
-/// Convert a `Value` into a human-readable string for display in a table cell.
-pub(crate) fn value_to_string(v: &Value) -> String {
+fn closure_to_source_string(engine: &EngineInterface, value: &Value) -> Option<String> {
+    let Value::Closure { val: closure, .. } = value else {
+        return None;
+    };
+
+    let value_span = value.span();
+    if value_span != Span::unknown() && !value_span.is_empty() {
+        if let Ok(bytes) = engine.get_span_contents(value_span) {
+            let s = String::from_utf8_lossy(&bytes).to_string();
+            if !s.trim().is_empty() {
+                return Some(s);
+            }
+        }
+    }
+
+    let ir = engine.get_block_ir(closure.block_id).ok()?;
+    let mut spans = ir
+        .spans
+        .iter()
+        .copied()
+        .filter(|span| !span.is_empty() && *span != Span::unknown());
+
+    let first = spans.next()?;
+    let mut start = first.start;
+    let mut end = first.end;
+    for span in spans {
+        start = start.min(span.start);
+        end = end.max(span.end);
+    }
+
+    if end <= start {
+        return None;
+    }
+
+    let source_span = Span::new(start, end);
+    let bytes = engine.get_span_contents(source_span).ok()?;
+    Some(String::from_utf8_lossy(&bytes).to_string())
+}
+
+fn value_to_json_value_serialize(v: &Value, engine: Option<&EngineInterface>) -> Option<serde_json::Value> {
+    match v {
+        Value::Bool { val, .. } => Some(serde_json::Value::Bool(*val)),
+        Value::Filesize { val, .. } => Some(serde_json::Value::Number(val.get().into())),
+        Value::Duration { val, .. } => Some(serde_json::Value::Number((*val).into())),
+        Value::Date { val, .. } => Some(serde_json::Value::String(val.to_string())),
+        Value::Float { val, .. } => serde_json::Number::from_f64(*val).map(serde_json::Value::Number),
+        Value::Int { val, .. } => Some(serde_json::Value::Number((*val).into())),
+        Value::Nothing { .. } => Some(serde_json::Value::Null),
+        Value::String { val, .. } => Some(serde_json::Value::String(val.clone())),
+        Value::Glob { val, .. } => Some(serde_json::Value::String(val.clone())),
+        Value::CellPath { val, .. } => Some(serde_json::Value::Array(
+            val.members
+                .iter()
+                .map(|member| match member {
+                    PathMember::String { val, .. } => serde_json::Value::String(val.clone()),
+                    PathMember::Int { val, .. } => serde_json::Value::Number((*val as i64).into()),
+                })
+                .collect(),
+        )),
+        Value::List { vals, .. } => Some(serde_json::Value::Array(
+            vals.iter()
+                .map(|value| value_to_json_value_serialize(value, engine).unwrap_or(serde_json::Value::Null))
+                .collect(),
+        )),
+        Value::Closure { val, .. } => {
+            let source = engine
+                .and_then(|engine| closure_to_source_string(engine, v))
+                .unwrap_or_else(|| format!("closure_{}", val.block_id.get()));
+            Some(serde_json::Value::String(source))
+        }
+        Value::Range { .. } => Some(serde_json::Value::Null),
+        Value::Binary { val, .. } => Some(serde_json::Value::Array(
+            val.iter()
+                .map(|byte| serde_json::Value::Number((*byte as u64).into()))
+                .collect(),
+        )),
+        Value::Record { val, .. } => {
+            let mut map = serde_json::Map::new();
+            for (key, value) in val.as_ref().iter() {
+                map.insert(
+                    key.clone(),
+                    value_to_json_value_serialize(value, engine).unwrap_or(serde_json::Value::Null),
+                );
+            }
+            Some(serde_json::Value::Object(map))
+        }
+        Value::Custom { val, .. } => {
+            let base = val.to_base_value(v.span()).ok()?;
+            value_to_json_value_serialize(&base, engine)
+        }
+        Value::Error { .. } => None,
+    }
+}
+
+fn value_to_string_with_engine(v: &Value, engine: Option<&EngineInterface>) -> String {
     match v {
         Value::String { val, .. } => val.clone(),
         Value::Int { val, .. } => val.to_string(),
@@ -18,25 +112,50 @@ pub(crate) fn value_to_string(v: &Value) -> String {
             let pairs: Vec<String> = rec
                 .as_ref()
                 .iter()
-                .map(|(k, v)| format!("{}: {}", k, value_to_string(v)))
+                .map(|(k, v)| format!("{}: {}", k, value_to_string_with_engine(v, engine)))
                 .collect();
             format!("{{{}}}", pairs.join(", "))
         }
         Value::List { vals, .. } => {
-            let elems: Vec<String> = vals.iter().map(value_to_string).collect();
+            let elems: Vec<String> = vals
+                .iter()
+                .map(|v| value_to_string_with_engine(v, engine))
+                .collect();
             format!("[{}]", elems.join(", "))
         }
-        // Closures: display as `closure_<block_id>` instead of raw JSON.
-        Value::Closure { .. } => v.to_expanded_string(", ", &Config::default()),
+        Value::Closure { val, .. } => {
+            if let Some(engine) = engine {
+                if let Some(source) = closure_to_source_string(engine, v) {
+                    return source;
+                }
+            }
+            format!("closure_{}", val.block_id.get())
+        }
         _ => {
-            // other values (errors, etc.) serialized the same way `to json --serialize` does.
+            if let Some(json_value) = value_to_json_value_serialize(v, engine) {
+                if let Ok(json) = serde_json::to_string(&json_value) {
+                    return json;
+                }
+            }
             if let Ok(json) = serde_json::to_string(v) {
                 json
             } else {
-                format!("{:?}", v)
+                v.to_expanded_string(", ", &Config::default())
             }
-        },
+        }
     }
+}
+
+/// Convert a `Value` into a human-readable string for display in a table cell.
+#[allow(dead_code)]
+pub(crate) fn value_to_string(v: &Value) -> String {
+    value_to_string_with_engine(v, None)
+}
+
+/// Convert a `Value` into a display string with optional engine context.
+#[allow(dead_code)]
+pub(crate) fn value_to_string_with_plugin_engine(v: &Value, engine: &EngineInterface) -> String {
+    value_to_string_with_engine(v, Some(engine))
 }
 
 /// Convert a slice of `Value` into a tabular representation.
@@ -49,6 +168,22 @@ pub(crate) fn value_to_string(v: &Value) -> String {
 /// * Other complex values are stringified via `Debug`.
 ///
 pub fn values_to_table(values: &[Value], transpose: bool) -> TableData {
+    values_to_table_with_engine(values, transpose, None)
+}
+
+pub fn values_to_table_with_plugin_engine(
+    values: &[Value],
+    transpose: bool,
+    engine: &EngineInterface,
+) -> TableData {
+    values_to_table_with_engine(values, transpose, Some(engine))
+}
+
+fn values_to_table_with_engine(
+    values: &[Value],
+    transpose: bool,
+    engine: Option<&EngineInterface>,
+) -> TableData {
     // If requested, and we only have a single record at the top level, convert
     // it to a two‑column key/value table.  This is handy when people pipe a
     // lone record into `to-gui` and expect to see the fields laid out as rows.
@@ -60,7 +195,7 @@ pub fn values_to_table(values: &[Value], transpose: bool) -> TableData {
                 let mut rows = Vec::new();
                 let mut raw_rows = Vec::new();
                 for (k, v) in rec.iter() {
-                    rows.push(vec![k.clone(), value_to_string(v)]);
+                    rows.push(vec![k.clone(), value_to_string_with_engine(v, engine)]);
                     raw_rows.push(vec![Value::string(k.clone(), Span::unknown()), v.clone()]);
                 }
                 return TableData::new(cols, rows, raw_rows);
@@ -111,7 +246,7 @@ pub fn values_to_table(values: &[Value], transpose: bool) -> TableData {
                 let mut raw_row = Vec::with_capacity(cols_vec.len());
                 for key in &cols_vec {
                     if let Some(val) = rec.get(key.as_str()) {
-                        row.push(value_to_string(val));
+                        row.push(value_to_string_with_engine(val, engine));
                         raw_row.push(val.clone());
                     } else {
                         row.push(String::new());
@@ -122,7 +257,7 @@ pub fn values_to_table(values: &[Value], transpose: bool) -> TableData {
                 raw_rows.push(raw_row);
             }
             other => {
-                rows.push(vec![value_to_string(other)]);
+                rows.push(vec![value_to_string_with_engine(other, engine)]);
                 raw_rows.push(vec![other.clone()]);
             }
         }
@@ -134,7 +269,7 @@ pub fn values_to_table(values: &[Value], transpose: bool) -> TableData {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nu_protocol::{Value, Span, Record};
+    use nu_protocol::{Value, Span, Record, engine::Closure};
 
     fn make_record(pairs: &[(&str, Value)]) -> Value {
         let mut rec = Record::new();
@@ -243,5 +378,17 @@ mod tests {
         // should begin with a JSON object rather than the debug variant
         assert!(s.trim_start().starts_with('{'));
         assert!(s.contains("bad"));
+    }
+
+    #[test]
+    fn closure_without_engine_uses_stable_name() {
+        let closure = Closure {
+            block_id: nu_protocol::BlockId::new(42),
+            captures: vec![],
+        };
+        let value = Value::closure(closure, Span::unknown());
+        let s = value_to_string(&value);
+        assert_eq!(s, "closure_42");
+        assert!(!s.contains("\"Closure\""));
     }
 }

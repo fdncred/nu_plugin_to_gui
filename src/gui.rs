@@ -29,11 +29,23 @@ use serde_json::Value as JsonValue;
 /// Each entry maps a nushell value-type key (e.g. `"int"`, `"string"`) to an
 /// `Rgba` color to use as the foreground for cells of that type.
 #[derive(Clone, Default)]
+pub struct CellStyle {
+    /// Foreground color.
+    pub fg: Option<Rgba>,
+    /// Background color.
+    pub bg: Option<Rgba>,
+    /// Bold text.
+    pub bold: bool,
+}
+
+#[derive(Clone, Default)]
 pub struct ColorConfig {
-    /// Foreground colors keyed by nushell type name.
-    pub type_colors: HashMap<String, Rgba>,
-    /// Foreground color for column headers (from `color_config.header`).
-    pub header_color: Option<Rgba>,
+    /// Cell styles keyed by nushell type name.
+    pub type_styles: HashMap<String, CellStyle>,
+    /// Style for column headers (from `color_config.header`).
+    pub header_style: CellStyle,
+    /// Parsed `$LS_COLORS` entries (`di`, `ln`, `*.rs`, ...).
+    pub ls_colors: HashMap<String, Rgba>,
 }
 
 // ---------------------------------------------------------------------------
@@ -90,6 +102,8 @@ pub struct NushellTableDelegate {
     color_config: ColorConfig,
     /// Per-column filter inputs rendered inside each column header.
     column_filter_inputs: Vec<Entity<InputState>>,
+    /// Last right-clicked column index (used for cell-aware copy action).
+    right_clicked_col: Option<usize>,
 }
 
 impl NushellTableDelegate {
@@ -131,6 +145,7 @@ impl NushellTableDelegate {
             column_filters: vec![None; num_cols],
             color_config,
             column_filter_inputs,
+            right_clicked_col: None,
         }
     }
 
@@ -191,7 +206,80 @@ impl NushellTableDelegate {
 
     fn cell_fg(&self, raw: &Value) -> Option<Rgba> {
         let key = value_type_key(raw);
-        self.color_config.type_colors.get(key).copied()
+        self.color_config
+            .type_styles
+            .get(key)
+            .and_then(|style| style.fg)
+    }
+
+    fn cell_bg(&self, raw: &Value) -> Option<Rgba> {
+        let key = value_type_key(raw);
+        self.color_config
+            .type_styles
+            .get(key)
+            .and_then(|style| style.bg)
+    }
+
+    fn cell_bold(&self, raw: &Value) -> bool {
+        let key = value_type_key(raw);
+        self.color_config
+            .type_styles
+            .get(key)
+            .map(|style| style.bold)
+            .unwrap_or(false)
+    }
+
+    fn ls_fg_for_name_cell(&self, real_row: usize, col_ix: usize) -> Option<Rgba> {
+        let col_name = self.columns.get(col_ix).map(|c| c.name.to_lowercase())?;
+        if col_name != "name" {
+            return None;
+        }
+
+        let name = self
+            .all_rows
+            .get(real_row)
+            .and_then(|r| r.get(col_ix))
+            .map(|s| s.as_str())
+            .unwrap_or_default();
+
+        if let Some(dot) = name.rfind('.') {
+            if dot + 1 < name.len() {
+                let ext = &name[dot + 1..];
+                if let Some(c) = self.color_config.ls_colors.get(&format!("*.{}", ext)) {
+                    return Some(*c);
+                }
+            }
+        }
+
+        let type_col_ix = self
+            .columns
+            .iter()
+            .position(|c| c.name.eq_ignore_ascii_case("type"));
+        if let Some(type_col_ix) = type_col_ix {
+            let row_ty = self
+                .all_rows
+                .get(real_row)
+                .and_then(|r| r.get(type_col_ix))
+                .map(|s| s.to_lowercase())
+                .unwrap_or_default();
+            let ls_key = match row_ty.as_str() {
+                "dir" | "directory" => Some("di"),
+                "symlink" | "link" => Some("ln"),
+                "pipe" => Some("pi"),
+                "socket" => Some("so"),
+                "block" | "block_device" => Some("bd"),
+                "char" | "char_device" => Some("cd"),
+                "file" => Some("fi"),
+                _ => None,
+            };
+            if let Some(ls_key) = ls_key {
+                if let Some(c) = self.color_config.ls_colors.get(ls_key) {
+                    return Some(*c);
+                }
+            }
+        }
+
+        self.color_config.ls_colors.get("fi").copied()
     }
 }
 
@@ -224,21 +312,33 @@ impl TableDelegate for NushellTableDelegate {
     fn render_th(
         &mut self,
         col_ix: usize,
-        _window: &mut Window,
-        _cx: &mut Context<TableState<Self>>,
+        window: &mut Window,
+        cx: &mut Context<TableState<Self>>,
     ) -> impl gpui::IntoElement {
         let name = self.columns[col_ix].name.clone();
-        let mut header = gpui::div()
-            .v_flex()
-            .gap_1()
-            .w_full()
-            .child(name);
-        if let Some(c) = self.color_config.header_color {
+        if let Some(inp) = self.column_filter_inputs.get(col_ix) {
+            inp.update(cx, |state, cx| {
+                state.set_placeholder(name.clone(), window, cx);
+            });
+        }
+
+        let mut header = gpui::div().v_flex().gap_1().w_full();
+        if let Some(inp) = self.column_filter_inputs.get(col_ix) {
+            header = header.child(
+                Input::new(inp)
+                    .appearance(false)
+                    .bordered(false)
+                    .focus_bordered(false),
+            );
+        }
+        if let Some(c) = self.color_config.header_style.fg {
             header = header.text_color(c);
         }
-        // Embed the per-column filter input directly in the header cell.
-        if let Some(inp) = self.column_filter_inputs.get(col_ix) {
-            header = header.child(Input::new(inp));
+        if let Some(c) = self.color_config.header_style.bg {
+            header = header.bg(c);
+        }
+        if self.color_config.header_style.bold {
+            header = header.font_weight(FontWeight::BOLD);
         }
         header
     }
@@ -248,15 +348,27 @@ impl TableDelegate for NushellTableDelegate {
         row_ix: usize,
         col_ix: usize,
         _window: &mut Window,
-        _cx: &mut Context<TableState<Self>>,
+        cx: &mut Context<TableState<Self>>,
     ) -> impl IntoElement {
         let real_row = self.visible_rows[row_ix];
         let text = self.all_rows[real_row][col_ix].clone();
         let raw  = &self.raw_rows[real_row][col_ix];
-        let fg   = self.cell_fg(raw);
+        let fg   = self.ls_fg_for_name_cell(real_row, col_ix).or_else(|| self.cell_fg(raw));
+        let bg   = self.cell_bg(raw);
+        let bold = self.cell_bold(raw);
 
         let mut div = gpui::div().size_full().child(text);
         if let Some(c) = fg { div = div.text_color(c); }
+        if let Some(c) = bg { div = div.bg(c); }
+        if bold { div = div.font_weight(FontWeight::BOLD); }
+        div = div
+            .on_mouse_down(MouseButton::Left, cx.listener(move |table, _, _, cx| {
+                table.set_selected_col(col_ix, cx);
+            }))
+            .on_mouse_down(MouseButton::Right, cx.listener(move |table, _, _, cx| {
+                table.set_selected_col(col_ix, cx);
+                table.delegate_mut().right_clicked_col = Some(col_ix);
+            }));
         div
     }
 
@@ -285,13 +397,15 @@ impl TableDelegate for NushellTableDelegate {
         _cx: &mut Context<TableState<Self>>,
     ) -> PopupMenu {
         let real_row = self.visible_rows.get(row_ix).copied().unwrap_or(row_ix);
-        // Copy all cells in the row joined by tabs — useful for pasting into spreadsheets.
-        let text = self.all_rows
+        let col_ix = self.right_clicked_col.unwrap_or(0);
+        let text = self
+            .all_rows
             .get(real_row)
-            .map(|r| r.join("\t"))
+            .and_then(|r| r.get(col_ix))
+            .cloned()
             .unwrap_or_default();
         menu.item(
-            PopupMenuItem::new("Copy Row").on_click(move |_, _, cx| {
+            PopupMenuItem::new("Copy").on_click(move |_, _, cx| {
                 cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
             }),
         )
@@ -310,6 +424,8 @@ pub struct ToGuiView {
     table_state: Entity<TableState<NushellTableDelegate>>,
     autosize: bool,
     color_config: ColorConfig,
+    save_dir: String,
+    status_message: String,
     /// Copy of the root data used by the Save button.
     root_data: TableData,
 }
@@ -322,6 +438,7 @@ impl ToGuiView {
         initial_filter: Option<String>,
         autosize: bool,
         color_config: ColorConfig,
+        save_dir: String,
     ) -> Self {
         let root_data = table_data.clone();
         let (fi, ts) = Self::build_page(
@@ -333,8 +450,32 @@ impl ToGuiView {
             table_state: ts,
             autosize,
             color_config,
+            save_dir,
+            status_message: String::new(),
             root_data,
         }
+    }
+
+    fn save_root_json(&self) -> std::io::Result<std::path::PathBuf> {
+        let data = &self.root_data;
+        let json_rows: Vec<serde_json::Value> = data
+            .rows
+            .iter()
+            .map(|row| {
+                let obj: serde_json::Map<String, serde_json::Value> = data
+                    .columns
+                    .iter()
+                    .zip(row.iter())
+                    .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
+                    .collect();
+                serde_json::Value::Object(obj)
+            })
+            .collect();
+
+        let json = serde_json::to_string_pretty(&json_rows).unwrap_or_else(|_| "[]".to_string());
+        let path = std::path::PathBuf::from(&self.save_dir).join("to-gui-output.json");
+        std::fs::write(&path, json)?;
+        Ok(path)
     }
 
     /// Create the filter widgets and table-state entity for a given `TableData`.
@@ -368,6 +509,9 @@ impl ToGuiView {
         });
 
         let fi = cx.new(|cx| InputState::new(window, cx));
+        fi.update(cx, |input, cx| {
+            input.set_placeholder("Global search", window, cx);
+        });
 
         // Global filter subscription
         let ts2 = ts.clone();
@@ -421,8 +565,8 @@ impl ToGuiView {
                     .copied()
                     .unwrap_or(row_ix);
 
-                // Try to navigate into the selected column's cell first.
-                let navigated = if let Some(raw_row) = data_clone.raw.get(real_row) {
+                // Navigate into the selected cell only.
+                if let Some(raw_row) = data_clone.raw.get(real_row) {
                     if let Some(raw) = raw_row.get(col_ix).cloned() {
                         let col_name = data_clone.columns.get(col_ix).map_or("?", |s| s.as_str());
                         let title = format!("row[{}].{}", real_row, col_name);
@@ -430,35 +574,13 @@ impl ToGuiView {
                             Value::Record { .. } => {
                                 let nested = crate::value_conv::values_to_table(&[raw.clone()], true);
                                 view.push_page(window, cx, nested, title, autosize_c, &cc_clone);
-                                true
                             }
                             Value::List { vals, .. } if !vals.is_empty() => {
                                 let nested = crate::value_conv::values_to_table(vals, true);
                                 view.push_page(window, cx, nested, title, autosize_c, &cc_clone);
-                                true
                             }
-                            _ => false,
+                            _ => {}
                         }
-                    } else {
-                        false
-                    }
-                } else {
-                    false
-                };
-
-                // Fallback: build a record from the whole row and navigate into it.
-                // This lets users double-click any row (e.g. an `ls` result) to see
-                // all fields in a transposed key/value view.
-                if !navigated {
-                    if let Some(raw_row) = data_clone.raw.get(real_row) {
-                        let mut rec = nu_protocol::Record::new();
-                        for (col_name, val) in data_clone.columns.iter().zip(raw_row.iter()) {
-                            rec.push(col_name.clone(), val.clone());
-                        }
-                        let row_val = Value::record(rec, nu_protocol::Span::unknown());
-                        let nested = crate::value_conv::values_to_table(&[row_val], true);
-                        let title = format!("row[{}]", real_row);
-                        view.push_page(window, cx, nested, title, autosize_c, &cc_clone);
                     }
                 }
             }
@@ -509,6 +631,52 @@ impl Render for ToGuiView {
         let weak = cx.weak_entity();
         let weak2 = cx.weak_entity();
 
+        let menu_item = |label: &'static str| {
+            gpui::div()
+                .px_2()
+                .py_1()
+                .rounded(px(3.0))
+                .text_color(rgb(0x111111))
+                .child(label)
+        };
+
+        let weak_save = cx.weak_entity();
+        let menu_bar = gpui::div()
+            .h_flex()
+            .gap_2()
+            .px_3()
+            .py_1()
+            .w_full()
+            .border_b_1()
+            .border_color(rgb(0xd5d5d5))
+            .bg(rgb(0xf3f4f6))
+            .child(
+                menu_item("File")
+                    .cursor_pointer()
+                    .on_mouse_down(MouseButton::Left, move |_, _window, cx| {
+                        weak_save
+                            .update(cx, |view, cx| {
+                                match view.save_root_json() {
+                                    Ok(path) => {
+                                        view.status_message = format!("Saved: {}", path.display());
+                                        eprintln!("to-gui: saved to {}", path.display());
+                                    }
+                                    Err(err) => {
+                                        view.status_message = format!("Save failed: {}", err);
+                                        eprintln!("to-gui: save failed: {}", err);
+                                    }
+                                }
+                                cx.notify();
+                            })
+                            .ok();
+                    }),
+            )
+            .child(menu_item("Edit"))
+            .child(menu_item("View"))
+            .child(menu_item("Options"))
+            .child(menu_item("Window"))
+            .child(menu_item("Help"));
+
         // In-window toolbar (visible on all platforms; primary on Windows/Linux)
         let toolbar = gpui::div()
             .h_flex()
@@ -526,7 +694,8 @@ impl Render for ToGuiView {
                         .px_2()
                         .py_1()
                         .rounded(px(4.0))
-                        .bg(rgb(0xe0e0e0))
+                        .bg(rgb(0x1f2937))
+                        .text_color(rgb(0xffffff))
                         .cursor_pointer()
                         .on_click(move |_, window, cx| {
                             weak.update(cx, |view, cx| view.pop_page(window, cx)).ok();
@@ -546,62 +715,67 @@ impl Render for ToGuiView {
                     .px_2()
                     .py_1()
                     .rounded(px(4.0))
-                    .bg(rgb(0xe0e0e0))
+                    .bg(rgb(0x1f2937))
+                    .text_color(rgb(0xffffff))
                     .cursor_pointer()
                     .on_click(move |_, _window, cx| {
-                        weak2.update(cx, |view, _cx| {
-                            let data = &view.root_data;
-                            // Serialize as a JSON array of objects (string values only).
-                            let json_rows: Vec<serde_json::Value> = data.rows.iter()
-                                .map(|row| {
-                                    let obj: serde_json::Map<String, serde_json::Value> =
-                                        data.columns.iter()
-                                            .zip(row.iter())
-                                            .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
-                                            .collect();
-                                    serde_json::Value::Object(obj)
-                                })
-                                .collect();
-                            if let Ok(json) = serde_json::to_string_pretty(&json_rows) {
-                                // Write to the system temp directory so we always have permission.
-                                let path = std::env::temp_dir().join("to-gui-output.json");
-                                match std::fs::write(&path, &json) {
-                                    Ok(_) => eprintln!("to-gui: saved to {}", path.display()),
-                                    Err(e) => eprintln!("to-gui: save failed: {}", e),
+                        weak2.update(cx, |view, cx| {
+                            match view.save_root_json() {
+                                Ok(path) => {
+                                    view.status_message = format!("Saved: {}", path.display());
+                                    eprintln!("to-gui: saved to {}", path.display());
+                                }
+                                Err(err) => {
+                                    view.status_message = format!("Save failed: {}", err);
+                                    eprintln!("to-gui: save failed: {}", err);
                                 }
                             }
+                            cx.notify();
                         }).ok();
                     })
                     .child("💾 Save"),
             );
 
-        // Global search bar
-        let filter_row = gpui::div()
+        // Global search in the status bar.
+        let status_bar = gpui::div()
             .h_flex()
             .gap_1()
             .px_2()
             .py_1()
             .w_full()
-            .border_b_1()
+            .border_t_1()
             .border_color(rgb(0xdddddd))
             .child(
                 gpui::div()
                     .flex_shrink_0()
                     .w_40()
-                    .child(Input::new(&self.filter_input)),
+                    .child(
+                        Input::new(&self.filter_input)
+                            .cleanable(true)
+                            .appearance(false)
+                            .bordered(false)
+                            .focus_bordered(false),
+                    ),
+            )
+            .child(
+                gpui::div()
+                    .flex_1()
+                    .text_color(rgb(0x555555))
+                    .child(self.status_message.clone()),
             );
 
         gpui::div()
             .v_flex()
             .size_full()
+            .child(menu_bar)
             .child(toolbar)
-            .child(filter_row)
             .child(
                 Table::new(&self.table_state)
                     .stripe(true)
                     .bordered(true)
                     .scrollbar_visible(true, true),
             )
+            .child(status_bar)
     }
 }
 
@@ -663,6 +837,7 @@ pub fn run_table_gui(
     initial_filter: Option<String>,
     autosize: bool,
     color_config: ColorConfig,
+    save_dir: String,
 ) -> Result<()> {
     let app = Application::new().with_assets(gpui_component_assets::Assets);
 
@@ -683,11 +858,13 @@ pub fn run_table_gui(
             },
             Menu { name: "Edit".into(), items: vec![] },
             Menu { name: "View".into(), items: vec![] },
+            Menu { name: "Options".into(), items: vec![] },
             Menu { name: "Window".into(), items: vec![] },
             Menu { name: "Help".into(), items: vec![] },
         ]);
 
         let ts = table.clone();
+        let save_dir2 = save_dir.clone();
         cx.on_action::<SaveAction>(move |_, _app| {
             let json_rows: Vec<serde_json::Value> = ts.rows.iter()
                 .map(|row| {
@@ -700,7 +877,7 @@ pub fn run_table_gui(
                 })
                 .collect();
             if let Ok(json) = serde_json::to_string_pretty(&json_rows) {
-                let path = std::env::temp_dir().join("to-gui-output.json");
+                let path = std::path::PathBuf::from(&save_dir2).join("to-gui-output.json");
                 let _ = std::fs::write(&path, json);
                 eprintln!("to-gui: saved to {}", path.display());
             }
@@ -715,8 +892,17 @@ pub fn run_table_gui(
         cx.spawn(async move |cx| {
             cx.open_window(window_options, move |window, cx| {
                 let cc = color_config.clone();
+                let save_dir = save_dir.clone();
                 let view = cx.new(|cx| {
-                    ToGuiView::new(window, cx, table.clone(), initial_filter.clone(), autosize, cc)
+                    ToGuiView::new(
+                        window,
+                        cx,
+                        table.clone(),
+                        initial_filter.clone(),
+                        autosize,
+                        cc,
+                        save_dir,
+                    )
                 });
                 cx.new(|cx| Root::new(view, window, cx))
             })?;
@@ -733,6 +919,7 @@ pub fn run_table_gui(
     _filter: Option<String>,
     _autosize: bool,
     _color_config: ColorConfig,
+    _save_dir: String,
 ) -> anyhow::Result<()> {
     Ok(())
 }
