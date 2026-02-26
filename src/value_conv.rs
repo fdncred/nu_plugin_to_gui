@@ -4,7 +4,15 @@
 use nu_protocol::{Config, Value, Span, ast::PathMember};
 use nu_plugin::EngineInterface;
 use crate::TableData;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::HashMap;
+
+fn format_with_config(v: &Value, config: Option<&Config>) -> String {
+    if let Some(cfg) = config {
+        v.to_expanded_string(", ", cfg)
+    } else {
+        v.to_expanded_string(", ", &Config::default())
+    }
+}
 
 fn closure_to_source_string(engine: &EngineInterface, value: &Value) -> Option<String> {
     let Value::Closure { val: closure, .. } = value else {
@@ -140,14 +148,21 @@ fn value_to_string_with_engine(
     v: &Value,
     engine: Option<&EngineInterface>,
     closure_sources: Option<&HashMap<usize, String>>,
+    config: Option<&Config>,
 ) -> String {
     match v {
-        Value::String { val, .. } => val.clone(),
-        Value::Int { val, .. } => val.to_string(),
-        Value::Float { val, .. } => val.to_string(),
-        Value::Bool { val, .. } => val.to_string(),
-        Value::Date { val, .. } => val.to_string(),
-        Value::Filesize { val, .. } => val.to_string(),
+        Value::String { .. }
+        | Value::Int { .. }
+        | Value::Float { .. }
+        | Value::Bool { .. }
+        | Value::Date { .. }
+        | Value::Filesize { .. }
+        | Value::Duration { .. }
+        | Value::Nothing { .. }
+        | Value::Glob { .. }
+        | Value::CellPath { .. }
+        | Value::Binary { .. }
+        | Value::Range { .. } => format_with_config(v, config),
         Value::Record { val: rec, .. } => {
             let pairs: Vec<String> = rec
                 .as_ref()
@@ -156,7 +171,7 @@ fn value_to_string_with_engine(
                     format!(
                         "{}: {}",
                         k,
-                        value_to_string_with_engine(v, engine, closure_sources)
+                        value_to_string_with_engine(v, engine, closure_sources, config)
                     )
                 })
                 .collect();
@@ -165,7 +180,7 @@ fn value_to_string_with_engine(
         Value::List { vals, .. } => {
             let elems: Vec<String> = vals
                 .iter()
-                .map(|v| value_to_string_with_engine(v, engine, closure_sources))
+                .map(|v| value_to_string_with_engine(v, engine, closure_sources, config))
                 .collect();
             format!("[{}]", elems.join(", "))
         }
@@ -188,11 +203,7 @@ fn value_to_string_with_engine(
                     return json;
                 }
             }
-            if let Ok(json) = serde_json::to_string(v) {
-                json
-            } else {
-                v.to_expanded_string(", ", &Config::default())
-            }
+            format_with_config(v, config)
         }
     }
 }
@@ -200,13 +211,14 @@ fn value_to_string_with_engine(
 /// Convert a `Value` into a human-readable string for display in a table cell.
 #[allow(dead_code)]
 pub(crate) fn value_to_string(v: &Value) -> String {
-    value_to_string_with_engine(v, None, None)
+    value_to_string_with_engine(v, None, None, None)
 }
 
 /// Convert a `Value` into a display string with optional engine context.
 #[allow(dead_code)]
 pub(crate) fn value_to_string_with_plugin_engine(v: &Value, engine: &EngineInterface) -> String {
-    value_to_string_with_engine(v, Some(engine), None)
+    let cfg = engine.get_config().ok();
+    value_to_string_with_engine(v, Some(engine), None, cfg.as_ref().map(|v| &**v))
 }
 
 fn collect_closure_sources(value: &Value, engine: &EngineInterface, out: &mut HashMap<usize, String>) {
@@ -256,7 +268,7 @@ pub fn collect_closure_sources_with_plugin_engine(
 /// * Other complex values are stringified via `Debug`.
 ///
 pub fn values_to_table(values: &[Value], transpose: bool) -> TableData {
-    values_to_table_with_engine(values, transpose, None, None)
+    values_to_table_with_engine(values, transpose, None, None, None)
 }
 
 pub fn values_to_table_with_plugin_engine(
@@ -264,7 +276,14 @@ pub fn values_to_table_with_plugin_engine(
     transpose: bool,
     engine: &EngineInterface,
 ) -> TableData {
-    values_to_table_with_engine(values, transpose, Some(engine), None)
+    let cfg = engine.get_config().ok();
+    values_to_table_with_engine(
+        values,
+        transpose,
+        Some(engine),
+        None,
+        cfg.as_ref().map(|v| &**v),
+    )
 }
 
 pub fn values_to_table_with_closure_sources(
@@ -272,7 +291,22 @@ pub fn values_to_table_with_closure_sources(
     transpose: bool,
     closure_sources: &HashMap<usize, String>,
 ) -> TableData {
-    values_to_table_with_engine(values, transpose, None, Some(closure_sources))
+    values_to_table_with_engine(values, transpose, None, Some(closure_sources), None)
+}
+
+pub fn values_to_table_with_closure_sources_and_config(
+    values: &[Value],
+    transpose: bool,
+    closure_sources: &HashMap<usize, String>,
+    config: &Config,
+) -> TableData {
+    values_to_table_with_engine(
+        values,
+        transpose,
+        None,
+        Some(closure_sources),
+        Some(config),
+    )
 }
 
 fn values_to_table_with_engine(
@@ -280,6 +314,7 @@ fn values_to_table_with_engine(
     transpose: bool,
     engine: Option<&EngineInterface>,
     closure_sources: Option<&HashMap<usize, String>>,
+    config: Option<&Config>,
 ) -> TableData {
     // If requested, and we only have a single record at the top level, convert
     // it to a two‑column key/value table.  This is handy when people pipe a
@@ -292,7 +327,7 @@ fn values_to_table_with_engine(
                 let mut rows = Vec::new();
                 let mut raw_rows = Vec::new();
                 for (k, v) in rec.iter() {
-                    rows.push(vec![k.clone(), value_to_string_with_engine(v, engine, closure_sources)]);
+                    rows.push(vec![k.clone(), value_to_string_with_engine(v, engine, closure_sources, config)]);
                     raw_rows.push(vec![Value::string(k.clone(), Span::unknown()), v.clone()]);
                 }
                 return TableData::new(cols, rows, raw_rows);
@@ -300,26 +335,30 @@ fn values_to_table_with_engine(
         }
     }
 
-    let mut columns = BTreeSet::new();
+    let mut cols_vec: Vec<String> = Vec::new();
+
+    let mut push_unique = |key: &str| {
+        if !cols_vec.iter().any(|k| k == key) {
+            cols_vec.push(key.to_string());
+        }
+    };
 
     // first pass: collect column names from all records
     for val in values {
         if let Value::Record { val: rec, .. } = val {
             for (k, _) in rec.as_ref().iter() {
-                columns.insert(k.clone());
+                push_unique(k);
             }
         } else if let Value::List { vals, .. } = val {
             for inner in vals {
                 if let Value::Record { val: rec, .. } = inner {
                     for (k, _) in rec.as_ref().iter() {
-                        columns.insert(k.clone());
+                        push_unique(k);
                     }
                 }
             }
         }
     }
-
-    let mut cols_vec: Vec<String> = columns.into_iter().collect();
 
     if cols_vec.is_empty() {
         cols_vec.push("value".into());
@@ -343,7 +382,7 @@ fn values_to_table_with_engine(
                 let mut raw_row = Vec::with_capacity(cols_vec.len());
                 for key in &cols_vec {
                     if let Some(val) = rec.get(key.as_str()) {
-                        row.push(value_to_string_with_engine(val, engine, closure_sources));
+                        row.push(value_to_string_with_engine(val, engine, closure_sources, config));
                         raw_row.push(val.clone());
                     } else {
                         row.push(String::new());
@@ -354,7 +393,7 @@ fn values_to_table_with_engine(
                 raw_rows.push(raw_row);
             }
             other => {
-                rows.push(vec![value_to_string_with_engine(other, engine, closure_sources)]);
+                rows.push(vec![value_to_string_with_engine(other, engine, closure_sources, config)]);
                 raw_rows.push(vec![other.clone()]);
             }
         }

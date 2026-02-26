@@ -303,14 +303,14 @@ impl PluginCommand for ToGuiCommand {
         let transpose = !no_transpose;
         let autosize = !no_autosize;
 
+        // Capture Nushell runtime config so formatting can match CLI output.
+        let nu_config = _engine.get_config().unwrap_or_default();
+
         // Build color configuration from $env.config.color_config.
         // `Config::color_config` is a HashMap<String, Value> that maps nushell
         // value-type names (e.g. "int", "float", "string", "header") to either
         // a color name string or a record with fg/bg/attr fields.
-        let color_config = _engine
-            .get_config()
-            .map(|cfg| color_config_from_map(&cfg.color_config))
-            .unwrap_or_default();
+        let color_config = color_config_from_map(&nu_config.color_config);
 
         let mut color_config = color_config;
         if let Ok(Some(Value::String { val, .. })) = _engine.get_env_var("LS_COLORS") {
@@ -336,6 +336,7 @@ impl PluginCommand for ToGuiCommand {
             color_config,
             save_dir,
             closure_sources,
+            (*nu_config).clone(),
         ) {
             eprintln!("to-gui: GUI error: {:#?}", err);
         }

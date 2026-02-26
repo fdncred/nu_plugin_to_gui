@@ -8,7 +8,7 @@
 //! table.
 
 use crate::TableData;
-use nu_protocol::Value;
+use nu_protocol::{Config, Value};
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
 use gpui_component::{Root, StyledExt};
@@ -605,6 +605,8 @@ pub struct ToGuiView {
     root_data: TableData,
     /// Closure source strings keyed by Nushell block id, captured at plugin entry.
     closure_sources: Arc<HashMap<usize, String>>,
+    /// Nushell runtime config used for display formatting (dates/filesizes/etc).
+    table_config: Arc<Config>,
 }
 
 impl ToGuiView {
@@ -617,9 +619,11 @@ impl ToGuiView {
         color_config: ColorConfig,
         save_dir: String,
         closure_sources: HashMap<usize, String>,
+        table_config: Config,
     ) -> Self {
         let root_data = table_data.clone();
         let closure_sources = Arc::new(closure_sources);
+        let table_config = Arc::new(table_config);
         let (fi, ts) = Self::build_page(
             window,
             cx,
@@ -628,6 +632,7 @@ impl ToGuiView {
             autosize,
             &color_config,
             closure_sources.clone(),
+            table_config.clone(),
         );
         ToGuiView {
             nav_stack: vec![(table_data, "root".into())],
@@ -639,6 +644,7 @@ impl ToGuiView {
             status_message: String::new(),
             root_data,
             closure_sources,
+            table_config,
         }
     }
 
@@ -726,6 +732,7 @@ impl ToGuiView {
         autosize: bool,
         cc: &ColorConfig,
         closure_sources: Arc<HashMap<usize, String>>,
+        table_config: Arc<Config>,
     ) -> (
         Entity<InputState>,
         Entity<TableState<NushellTableDelegate>>,
@@ -791,6 +798,7 @@ impl ToGuiView {
         let autosize_c  = autosize;
         let cc_clone    = cc.clone();
         let closure_sources_c = closure_sources.clone();
+        let table_config_c = table_config.clone();
         cx.subscribe_in(&ts, window, move |view, _state, event, window, cx| {
             if let TableEvent::DoubleClickedRow(row_ix) = event {
                 let row_ix = *row_ix;
@@ -819,18 +827,20 @@ impl ToGuiView {
                         let title = format!("row[{}].{}", real_row, col_name);
                         match &raw {
                             Value::Record { .. } => {
-                                let nested = crate::value_conv::values_to_table_with_closure_sources(
+                                let nested = crate::value_conv::values_to_table_with_closure_sources_and_config(
                                     &[raw.clone()],
                                     true,
                                     &closure_sources_c,
+                                    &table_config_c,
                                 );
                                 view.push_page(window, cx, nested, title, autosize_c, &cc_clone);
                             }
                             Value::List { vals, .. } if !vals.is_empty() => {
-                                let nested = crate::value_conv::values_to_table_with_closure_sources(
+                                let nested = crate::value_conv::values_to_table_with_closure_sources_and_config(
                                     vals,
                                     true,
                                     &closure_sources_c,
+                                    &table_config_c,
                                 );
                                 view.push_page(window, cx, nested, title, autosize_c, &cc_clone);
                             }
@@ -862,6 +872,7 @@ impl ToGuiView {
             autosize,
             cc,
             self.closure_sources.clone(),
+            self.table_config.clone(),
         );
         self.filter_input = fi;
         self.table_state  = ts;
@@ -881,6 +892,7 @@ impl ToGuiView {
                 self.autosize,
                 &cc,
                 self.closure_sources.clone(),
+                self.table_config.clone(),
             );
             self.filter_input = fi;
             self.table_state  = ts;
@@ -1189,6 +1201,7 @@ pub fn run_table_gui(
     color_config: ColorConfig,
     save_dir: String,
     closure_sources: HashMap<usize, String>,
+    table_config: Config,
 ) -> Result<()> {
     let app = Application::new().with_assets(gpui_component_assets::Assets);
 
@@ -1249,6 +1262,7 @@ pub fn run_table_gui(
         let ts = table.clone();
         let save_dir2 = save_dir.clone();
         let closure_sources2 = closure_sources.clone();
+        let table_config2 = table_config.clone();
         cx.on_action::<SaveAction>(move |_, _app| {
             let json_rows: Vec<serde_json::Value> = ts.rows.iter()
                 .map(|row| {
@@ -1287,6 +1301,7 @@ pub fn run_table_gui(
                         cc,
                         save_dir,
                         closure_sources2,
+                        table_config2,
                     )
                 });
                 cx.new(|cx| Root::new(view, window, cx))
@@ -1306,6 +1321,7 @@ pub fn run_table_gui(
     _color_config: ColorConfig,
     _save_dir: String,
     _closure_sources: HashMap<usize, String>,
+    _table_config: Config,
 ) -> anyhow::Result<()> {
     Ok(())
 }
@@ -1412,7 +1428,15 @@ mod tests {
     #[test]
     fn run_table_gui_stub() {
         let dummy = TableData::new(vec![], vec![], vec![]);
-        let _ = run_table_gui(dummy, None, false, ColorConfig::default(), String::new(), HashMap::new());
+        let _ = run_table_gui(
+            dummy,
+            None,
+            false,
+            ColorConfig::default(),
+            String::new(),
+            HashMap::new(),
+            Config::default(),
+        );
     }
 
     #[test]
