@@ -22,27 +22,45 @@ fn closure_to_source_string(engine: &EngineInterface, value: &Value) -> Option<S
     }
 
     let ir = engine.get_block_ir(closure.block_id).ok()?;
-    let mut spans = ir
+    let spans: Vec<Span> = ir
         .spans
         .iter()
         .copied()
-        .filter(|span| !span.is_empty() && *span != Span::unknown());
+        .filter(|span| !span.is_empty() && *span != Span::unknown())
+        .collect();
 
-    let first = spans.next()?;
+    let mut snippets = Vec::new();
+    for span in &spans {
+        if let Ok(bytes) = engine.get_span_contents(*span) {
+            let s = String::from_utf8_lossy(&bytes).trim().to_string();
+            if !s.is_empty() {
+                snippets.push(s);
+            }
+        }
+    }
+    if !snippets.is_empty() {
+        return Some(snippets.join(" "));
+    }
+
+    let first = *spans.first()?;
     let mut start = first.start;
     let mut end = first.end;
-    for span in spans {
+    for span in spans.into_iter().skip(1) {
         start = start.min(span.start);
         end = end.max(span.end);
     }
-
     if end <= start {
         return None;
     }
 
     let source_span = Span::new(start, end);
     let bytes = engine.get_span_contents(source_span).ok()?;
-    Some(String::from_utf8_lossy(&bytes).to_string())
+    let source = String::from_utf8_lossy(&bytes).trim().to_string();
+    if source.is_empty() {
+        None
+    } else {
+        Some(source)
+    }
 }
 
 fn value_to_json_value_serialize(v: &Value, engine: Option<&EngineInterface>) -> Option<serde_json::Value> {
