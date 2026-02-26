@@ -1,7 +1,7 @@
 //! Conversion utilities for turning Nushell `Value`/`PipelineData` into
 //! `TableData` suitable for display.
 
-use nu_protocol::Value;
+use nu_protocol::{Value, Span};
 use crate::TableData;
 use std::collections::BTreeSet;
 
@@ -36,7 +36,15 @@ pub fn values_to_table(values: &[Value], transpose: bool) -> TableData {
                 let elems: Vec<String> = vals.iter().map(value_to_string).collect();
                 format!("[{}]", elems.join(", "))
             }
-            _ => format!("{:?}", v),
+            _ => {
+                // some values (closures, errors, etc.) look nicer when
+                // serialized the same way `to json --serialize` does.
+                if let Ok(json) = serde_json::to_string(v) {
+                    json
+                } else {
+                    format!("{:?}", v)
+                }
+            },
         }
     }
 
@@ -47,12 +55,14 @@ pub fn values_to_table(values: &[Value], transpose: bool) -> TableData {
         if values.len() == 1 {
             if let Value::Record { val: rec, .. } = &values[0] {
                 let rec = rec.as_ref();
-                let mut cols = vec!["key".to_string(), "value".to_string()];
+                let cols = vec!["key".to_string(), "value".to_string()];
                 let mut rows = Vec::new();
+                let mut raw_rows = Vec::new();
                 for (k, v) in rec.iter() {
                     rows.push(vec![k.clone(), value_to_string(v)]);
+                    raw_rows.push(vec![Value::string(k.clone(), Span::unknown()), v.clone()]);
                 }
-                return TableData::new(cols, rows);
+                return TableData::new(cols, rows, raw_rows);
             }
         }
     }
@@ -82,30 +92,42 @@ pub fn values_to_table(values: &[Value], transpose: bool) -> TableData {
         cols_vec.push("value".into());
     }
 
-    let rows: Vec<Vec<String>> = values
+    // We'll build parallel string and raw representations.
+    let mut rows: Vec<Vec<String>> = Vec::new();
+    let mut raw_rows: Vec<Vec<Value>> = Vec::new();
+
+    for v in values
         .iter()
         .flat_map(|val| match val {
             Value::List { vals, .. } => vals.clone(),
             _ => vec![val.clone()],
         })
-        .map(|v| match &v {
+    {
+        match &v {
             Value::Record { val: rec, .. } => {
                 let rec = rec.as_ref();
                 let mut row = Vec::with_capacity(cols_vec.len());
+                let mut raw_row = Vec::with_capacity(cols_vec.len());
                 for key in &cols_vec {
                     if let Some(val) = rec.get(key.as_str()) {
                         row.push(value_to_string(val));
+                        raw_row.push(val.clone());
                     } else {
                         row.push(String::new());
+                        raw_row.push(Value::nothing(Span::unknown()));
                     }
                 }
-                row
+                rows.push(row);
+                raw_rows.push(raw_row);
             }
-            other => vec![value_to_string(other)],
-        })
-        .collect();
+            other => {
+                rows.push(vec![value_to_string(other)]);
+                raw_rows.push(vec![other.clone()]);
+            }
+        }
+    }
 
-    TableData::new(cols_vec, rows)
+    TableData::new(cols_vec, rows, raw_rows)
 }
 
 #[cfg(test)]
@@ -127,6 +149,7 @@ mod tests {
         assert_eq!(table.rows.len(), 2);
         assert_eq!(table.rows[0][0], "1");
         assert_eq!(table.rows[1][0], "foo");
+        assert_eq!(table.raw[1][0], Value::string("foo", Span::unknown()));
     }
 
     #[test]
@@ -169,6 +192,8 @@ mod tests {
         let table = values_to_table(&[list], false);
         assert_eq!(table.columns, vec!["a"]);
         assert_eq!(table.rows.len(), 2);
+        // raw values preserved
+        assert_eq!(table.raw[0][0], Value::int(1, Span::unknown()));
     }
 
     #[test]
@@ -197,5 +222,23 @@ mod tests {
         let table = values_to_table(&[nest], false);
         assert!(table.rows[0][0].starts_with("["));
         assert!(table.rows[0][0].contains("x: 5"));
+    }
+
+    #[test]
+    fn fallback_serializes_unhandled_values() {
+        use nu_protocol::ShellError;
+        // Create an error value which isn't specially handled in `value_to_string`.
+        let err = Value::error(ShellError::GenericError {
+            error: "bad".into(),
+            msg: "bad".into(),
+            span: Span::unknown(),
+            help: None,
+            label: None,
+            filename: None,
+        });
+        let s = value_to_string(&err);
+        // should begin with a JSON object rather than the debug variant
+        assert!(s.trim_start().starts_with('{'));
+        assert!(s.contains("bad"));
     }
 }

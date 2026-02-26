@@ -1,6 +1,7 @@
 use nu_protocol::engine::EngineState;
-use nu_protocol::command::EvaluatedCall;
-use nu_protocol::{IntoPipelineData, PipelineDataExt, Span, PipelineData, Value};
+use nu_plugin::EvaluatedCall;
+use nu_plugin::PluginCommand;
+use nu_protocol::{Span, PipelineData, Value};
 
 use nu_plugin_to_gui::{ToGuiCommand, ToGuiPlugin};
 

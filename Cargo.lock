@@ -4221,6 +4221,8 @@ dependencies = [
  "gpui-component-assets",
  "nu-plugin",
  "nu-protocol",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
