@@ -4,7 +4,7 @@
 use nu_protocol::{Config, Value, Span, ast::PathMember};
 use nu_plugin::EngineInterface;
 use crate::TableData;
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 
 fn closure_to_source_string(engine: &EngineInterface, value: &Value) -> Option<String> {
     let Value::Closure { val: closure, .. } = value else {
@@ -63,7 +63,11 @@ fn closure_to_source_string(engine: &EngineInterface, value: &Value) -> Option<S
     }
 }
 
-fn value_to_json_value_serialize(v: &Value, engine: Option<&EngineInterface>) -> Option<serde_json::Value> {
+fn value_to_json_value_serialize(
+    v: &Value,
+    engine: Option<&EngineInterface>,
+    closure_sources: Option<&HashMap<usize, String>>,
+) -> Option<serde_json::Value> {
     match v {
         Value::Bool { val, .. } => Some(serde_json::Value::Bool(*val)),
         Value::Filesize { val, .. } => Some(serde_json::Value::Number(val.get().into())),
@@ -85,13 +89,26 @@ fn value_to_json_value_serialize(v: &Value, engine: Option<&EngineInterface>) ->
         )),
         Value::List { vals, .. } => Some(serde_json::Value::Array(
             vals.iter()
-                .map(|value| value_to_json_value_serialize(value, engine).unwrap_or(serde_json::Value::Null))
+                .map(|value| {
+                    value_to_json_value_serialize(value, engine, closure_sources)
+                        .unwrap_or(serde_json::Value::Null)
+                })
                 .collect(),
         )),
         Value::Closure { val, .. } => {
-            let source = engine
+            let mut source = engine
                 .and_then(|engine| closure_to_source_string(engine, v))
-                .unwrap_or_else(|| format!("closure_{}", val.block_id.get()));
+                .unwrap_or_default();
+            if source.is_empty() {
+                if let Some(cache) = closure_sources {
+                    if let Some(cached) = cache.get(&val.block_id.get()) {
+                        source = cached.clone();
+                    }
+                }
+            }
+            if source.is_empty() {
+                source = format!("closure_{}", val.block_id.get());
+            }
             Some(serde_json::Value::String(source))
         }
         Value::Range { .. } => Some(serde_json::Value::Null),
@@ -105,20 +122,25 @@ fn value_to_json_value_serialize(v: &Value, engine: Option<&EngineInterface>) ->
             for (key, value) in val.as_ref().iter() {
                 map.insert(
                     key.clone(),
-                    value_to_json_value_serialize(value, engine).unwrap_or(serde_json::Value::Null),
+                    value_to_json_value_serialize(value, engine, closure_sources)
+                        .unwrap_or(serde_json::Value::Null),
                 );
             }
             Some(serde_json::Value::Object(map))
         }
         Value::Custom { val, .. } => {
             let base = val.to_base_value(v.span()).ok()?;
-            value_to_json_value_serialize(&base, engine)
+            value_to_json_value_serialize(&base, engine, closure_sources)
         }
         Value::Error { .. } => None,
     }
 }
 
-fn value_to_string_with_engine(v: &Value, engine: Option<&EngineInterface>) -> String {
+fn value_to_string_with_engine(
+    v: &Value,
+    engine: Option<&EngineInterface>,
+    closure_sources: Option<&HashMap<usize, String>>,
+) -> String {
     match v {
         Value::String { val, .. } => val.clone(),
         Value::Int { val, .. } => val.to_string(),
@@ -130,14 +152,20 @@ fn value_to_string_with_engine(v: &Value, engine: Option<&EngineInterface>) -> S
             let pairs: Vec<String> = rec
                 .as_ref()
                 .iter()
-                .map(|(k, v)| format!("{}: {}", k, value_to_string_with_engine(v, engine)))
+                .map(|(k, v)| {
+                    format!(
+                        "{}: {}",
+                        k,
+                        value_to_string_with_engine(v, engine, closure_sources)
+                    )
+                })
                 .collect();
             format!("{{{}}}", pairs.join(", "))
         }
         Value::List { vals, .. } => {
             let elems: Vec<String> = vals
                 .iter()
-                .map(|v| value_to_string_with_engine(v, engine))
+                .map(|v| value_to_string_with_engine(v, engine, closure_sources))
                 .collect();
             format!("[{}]", elems.join(", "))
         }
@@ -147,10 +175,15 @@ fn value_to_string_with_engine(v: &Value, engine: Option<&EngineInterface>) -> S
                     return source;
                 }
             }
+            if let Some(cache) = closure_sources {
+                if let Some(cached) = cache.get(&val.block_id.get()) {
+                    return cached.clone();
+                }
+            }
             format!("closure_{}", val.block_id.get())
         }
         _ => {
-            if let Some(json_value) = value_to_json_value_serialize(v, engine) {
+            if let Some(json_value) = value_to_json_value_serialize(v, engine, closure_sources) {
                 if let Ok(json) = serde_json::to_string(&json_value) {
                     return json;
                 }
@@ -167,13 +200,50 @@ fn value_to_string_with_engine(v: &Value, engine: Option<&EngineInterface>) -> S
 /// Convert a `Value` into a human-readable string for display in a table cell.
 #[allow(dead_code)]
 pub(crate) fn value_to_string(v: &Value) -> String {
-    value_to_string_with_engine(v, None)
+    value_to_string_with_engine(v, None, None)
 }
 
 /// Convert a `Value` into a display string with optional engine context.
 #[allow(dead_code)]
 pub(crate) fn value_to_string_with_plugin_engine(v: &Value, engine: &EngineInterface) -> String {
-    value_to_string_with_engine(v, Some(engine))
+    value_to_string_with_engine(v, Some(engine), None)
+}
+
+fn collect_closure_sources(value: &Value, engine: &EngineInterface, out: &mut HashMap<usize, String>) {
+    match value {
+        Value::Closure { val, .. } => {
+            if let Some(source) = closure_to_source_string(engine, value) {
+                out.entry(val.block_id.get()).or_insert(source);
+            }
+        }
+        Value::List { vals, .. } => {
+            for item in vals {
+                collect_closure_sources(item, engine, out);
+            }
+        }
+        Value::Record { val, .. } => {
+            for (_, item) in val.as_ref().iter() {
+                collect_closure_sources(item, engine, out);
+            }
+        }
+        Value::Custom { val, .. } => {
+            if let Ok(base) = val.to_base_value(value.span()) {
+                collect_closure_sources(&base, engine, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+pub fn collect_closure_sources_with_plugin_engine(
+    values: &[Value],
+    engine: &EngineInterface,
+) -> HashMap<usize, String> {
+    let mut out = HashMap::new();
+    for value in values {
+        collect_closure_sources(value, engine, &mut out);
+    }
+    out
 }
 
 /// Convert a slice of `Value` into a tabular representation.
@@ -186,7 +256,7 @@ pub(crate) fn value_to_string_with_plugin_engine(v: &Value, engine: &EngineInter
 /// * Other complex values are stringified via `Debug`.
 ///
 pub fn values_to_table(values: &[Value], transpose: bool) -> TableData {
-    values_to_table_with_engine(values, transpose, None)
+    values_to_table_with_engine(values, transpose, None, None)
 }
 
 pub fn values_to_table_with_plugin_engine(
@@ -194,13 +264,22 @@ pub fn values_to_table_with_plugin_engine(
     transpose: bool,
     engine: &EngineInterface,
 ) -> TableData {
-    values_to_table_with_engine(values, transpose, Some(engine))
+    values_to_table_with_engine(values, transpose, Some(engine), None)
+}
+
+pub fn values_to_table_with_closure_sources(
+    values: &[Value],
+    transpose: bool,
+    closure_sources: &HashMap<usize, String>,
+) -> TableData {
+    values_to_table_with_engine(values, transpose, None, Some(closure_sources))
 }
 
 fn values_to_table_with_engine(
     values: &[Value],
     transpose: bool,
     engine: Option<&EngineInterface>,
+    closure_sources: Option<&HashMap<usize, String>>,
 ) -> TableData {
     // If requested, and we only have a single record at the top level, convert
     // it to a two‑column key/value table.  This is handy when people pipe a
@@ -213,7 +292,7 @@ fn values_to_table_with_engine(
                 let mut rows = Vec::new();
                 let mut raw_rows = Vec::new();
                 for (k, v) in rec.iter() {
-                    rows.push(vec![k.clone(), value_to_string_with_engine(v, engine)]);
+                    rows.push(vec![k.clone(), value_to_string_with_engine(v, engine, closure_sources)]);
                     raw_rows.push(vec![Value::string(k.clone(), Span::unknown()), v.clone()]);
                 }
                 return TableData::new(cols, rows, raw_rows);
@@ -264,7 +343,7 @@ fn values_to_table_with_engine(
                 let mut raw_row = Vec::with_capacity(cols_vec.len());
                 for key in &cols_vec {
                     if let Some(val) = rec.get(key.as_str()) {
-                        row.push(value_to_string_with_engine(val, engine));
+                        row.push(value_to_string_with_engine(val, engine, closure_sources));
                         raw_row.push(val.clone());
                     } else {
                         row.push(String::new());
@@ -275,7 +354,7 @@ fn values_to_table_with_engine(
                 raw_rows.push(raw_row);
             }
             other => {
-                rows.push(vec![value_to_string_with_engine(other, engine)]);
+                rows.push(vec![value_to_string_with_engine(other, engine, closure_sources)]);
                 raw_rows.push(vec![other.clone()]);
             }
         }

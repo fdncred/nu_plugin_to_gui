@@ -19,6 +19,7 @@ use gpui_component::menu::{DropdownMenu as _, PopupMenu, PopupMenuItem};
 use std::collections::HashMap;
 use anyhow::Result;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 // json value type alias to avoid collision with `nu_protocol::Value`.
 use serde_json::Value as JsonValue;
@@ -602,6 +603,8 @@ pub struct ToGuiView {
     status_message: String,
     /// Copy of the root data used by the Save button.
     root_data: TableData,
+    /// Closure source strings keyed by Nushell block id, captured at plugin entry.
+    closure_sources: Arc<HashMap<usize, String>>,
 }
 
 impl ToGuiView {
@@ -613,10 +616,18 @@ impl ToGuiView {
         autosize: bool,
         color_config: ColorConfig,
         save_dir: String,
+        closure_sources: HashMap<usize, String>,
     ) -> Self {
         let root_data = table_data.clone();
+        let closure_sources = Arc::new(closure_sources);
         let (fi, ts) = Self::build_page(
-            window, cx, &table_data, initial_filter, autosize, &color_config,
+            window,
+            cx,
+            &table_data,
+            initial_filter,
+            autosize,
+            &color_config,
+            closure_sources.clone(),
         );
         ToGuiView {
             nav_stack: vec![(table_data, "root".into())],
@@ -627,6 +638,7 @@ impl ToGuiView {
             save_dir,
             status_message: String::new(),
             root_data,
+            closure_sources,
         }
     }
 
@@ -713,6 +725,7 @@ impl ToGuiView {
         initial_filter: Option<String>,
         autosize: bool,
         cc: &ColorConfig,
+        closure_sources: Arc<HashMap<usize, String>>,
     ) -> (
         Entity<InputState>,
         Entity<TableState<NushellTableDelegate>>,
@@ -777,6 +790,7 @@ impl ToGuiView {
         let data_clone = data.clone();
         let autosize_c  = autosize;
         let cc_clone    = cc.clone();
+        let closure_sources_c = closure_sources.clone();
         cx.subscribe_in(&ts, window, move |view, _state, event, window, cx| {
             if let TableEvent::DoubleClickedRow(row_ix) = event {
                 let row_ix = *row_ix;
@@ -805,11 +819,19 @@ impl ToGuiView {
                         let title = format!("row[{}].{}", real_row, col_name);
                         match &raw {
                             Value::Record { .. } => {
-                                let nested = crate::value_conv::values_to_table(&[raw.clone()], true);
+                                let nested = crate::value_conv::values_to_table_with_closure_sources(
+                                    &[raw.clone()],
+                                    true,
+                                    &closure_sources_c,
+                                );
                                 view.push_page(window, cx, nested, title, autosize_c, &cc_clone);
                             }
                             Value::List { vals, .. } if !vals.is_empty() => {
-                                let nested = crate::value_conv::values_to_table(vals, true);
+                                let nested = crate::value_conv::values_to_table_with_closure_sources(
+                                    vals,
+                                    true,
+                                    &closure_sources_c,
+                                );
                                 view.push_page(window, cx, nested, title, autosize_c, &cc_clone);
                             }
                             _ => {}
@@ -832,7 +854,15 @@ impl ToGuiView {
         cc: &ColorConfig,
     ) {
         self.nav_stack.push((data.clone(), title));
-        let (fi, ts) = Self::build_page(window, cx, &data, None, autosize, cc);
+        let (fi, ts) = Self::build_page(
+            window,
+            cx,
+            &data,
+            None,
+            autosize,
+            cc,
+            self.closure_sources.clone(),
+        );
         self.filter_input = fi;
         self.table_state  = ts;
         cx.notify();
@@ -843,7 +873,15 @@ impl ToGuiView {
             self.nav_stack.pop();
             let (data, _) = self.nav_stack.last().unwrap().clone();
             let cc = self.color_config.clone();
-            let (fi, ts) = Self::build_page(window, cx, &data, None, self.autosize, &cc);
+            let (fi, ts) = Self::build_page(
+                window,
+                cx,
+                &data,
+                None,
+                self.autosize,
+                &cc,
+                self.closure_sources.clone(),
+            );
             self.filter_input = fi;
             self.table_state  = ts;
             cx.notify();
@@ -1150,6 +1188,7 @@ pub fn run_table_gui(
     autosize: bool,
     color_config: ColorConfig,
     save_dir: String,
+    closure_sources: HashMap<usize, String>,
 ) -> Result<()> {
     let app = Application::new().with_assets(gpui_component_assets::Assets);
 
@@ -1209,6 +1248,7 @@ pub fn run_table_gui(
 
         let ts = table.clone();
         let save_dir2 = save_dir.clone();
+        let closure_sources2 = closure_sources.clone();
         cx.on_action::<SaveAction>(move |_, _app| {
             let json_rows: Vec<serde_json::Value> = ts.rows.iter()
                 .map(|row| {
@@ -1246,6 +1286,7 @@ pub fn run_table_gui(
                         autosize,
                         cc,
                         save_dir,
+                        closure_sources2,
                     )
                 });
                 cx.new(|cx| Root::new(view, window, cx))
@@ -1264,6 +1305,7 @@ pub fn run_table_gui(
     _autosize: bool,
     _color_config: ColorConfig,
     _save_dir: String,
+    _closure_sources: HashMap<usize, String>,
 ) -> anyhow::Result<()> {
     Ok(())
 }
@@ -1370,7 +1412,7 @@ mod tests {
     #[test]
     fn run_table_gui_stub() {
         let dummy = TableData::new(vec![], vec![], vec![]);
-        let _ = run_table_gui(dummy, None, false, ColorConfig::default());
+        let _ = run_table_gui(dummy, None, false, ColorConfig::default(), String::new(), HashMap::new());
     }
 
     #[test]

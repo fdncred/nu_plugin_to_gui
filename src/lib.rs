@@ -322,13 +322,21 @@ impl PluginCommand for ToGuiCommand {
             .unwrap_or_else(|_| std::env::current_dir().map(|p| p.display().to_string()).unwrap_or_else(|_| ".".to_string()));
 
         let values: Vec<Value> = input.into_iter().collect();
+        let closure_sources = crate::value_conv::collect_closure_sources_with_plugin_engine(&values, _engine);
         let table = crate::value_conv::values_to_table_with_plugin_engine(&values, transpose, _engine);
 
         #[cfg(test)]
-        let _ = (&initial_filter, autosize, &save_dir, &table);
+        let _ = (&initial_filter, autosize, &save_dir, &table, &closure_sources);
 
         #[cfg(not(test))]
-        if let Err(err) = crate::gui::run_table_gui(table, initial_filter, autosize, color_config, save_dir) {
+        if let Err(err) = crate::gui::run_table_gui(
+            table,
+            initial_filter,
+            autosize,
+            color_config,
+            save_dir,
+            closure_sources,
+        ) {
             eprintln!("to-gui: GUI error: {:#?}", err);
         }
 
