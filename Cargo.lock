@@ -4251,10 +4251,12 @@ dependencies = [
  "gpui",
  "gpui-component",
  "gpui-component-assets",
+ "lscolors",
  "nu-ansi-term",
  "nu-color-config",
  "nu-plugin",
  "nu-protocol",
+ "nu-utils",
  "serde",
  "serde_json",
 ]

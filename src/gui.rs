@@ -45,10 +45,16 @@ pub struct CellStyle {
 pub struct ColorConfig {
     /// Cell styles keyed by nushell type name.
     pub type_styles: HashMap<String, CellStyle>,
+    /// Dynamic per-value styles keyed by nushell type name then serialized value key.
+    pub value_styles: HashMap<String, HashMap<String, CellStyle>>,
     /// Style for column headers (from `color_config.header`).
     pub header_style: CellStyle,
     /// Parsed `$LS_COLORS` entries (`di`, `ln`, `*.rs`, ...).
     pub ls_colors: HashMap<String, Rgba>,
+}
+
+fn style_cache_key(v: &Value) -> String {
+    serde_json::to_string(v).unwrap_or_else(|_| format!("{:?}", v.get_type()))
 }
 
 // ---------------------------------------------------------------------------
@@ -126,16 +132,40 @@ impl NushellTableDelegate {
             .map(|c| Column::new(c.clone(), c.clone()).sortable())
             .collect();
 
+        for (col_ix, col) in columns.iter_mut().enumerate() {
+            let numeric = data
+                .raw
+                .iter()
+                .filter_map(|row| row.get(col_ix))
+                .filter(|v| !matches!(v, Value::Nothing { .. }))
+                .all(|v| {
+                    matches!(
+                        v,
+                        Value::Int { .. }
+                            | Value::Float { .. }
+                            | Value::Filesize { .. }
+                            | Value::Duration { .. }
+                    )
+                });
+            if numeric {
+                col.align = TextAlign::Right;
+            }
+        }
+
         if autosize {
+            const CHAR_W: f32 = 8.0;
+            const CELL_EXTRA_W: f32 = 20.0;
+            const HEADER_EXTRA_W: f32 = 52.0;
             for (col_ix, col) in columns.iter_mut().enumerate() {
                 let max_len = data
                     .rows
                     .iter()
                     .map(|row| row.get(col_ix).map(|s| s.len()).unwrap_or(0))
-                    .chain(std::iter::once(col.name.len()))
                     .max()
                     .unwrap_or(0);
-                col.width = ((max_len as f32) * 8.0 + 20.0).into();
+                let cell_w = (max_len as f32) * CHAR_W + CELL_EXTRA_W;
+                let header_w = (col.name.len() as f32) * CHAR_W + HEADER_EXTRA_W;
+                col.width = cell_w.max(header_w).into();
             }
         }
 
@@ -212,6 +242,14 @@ impl NushellTableDelegate {
 
     fn cell_fg(&self, raw: &Value) -> Option<Rgba> {
         let key = value_type_key(raw);
+        if let Some(style) = self
+            .color_config
+            .value_styles
+            .get(key)
+            .and_then(|by_value| by_value.get(&style_cache_key(raw)))
+        {
+            return style.fg;
+        }
         self.color_config
             .type_styles
             .get(key)
@@ -220,6 +258,14 @@ impl NushellTableDelegate {
 
     fn cell_bg(&self, raw: &Value) -> Option<Rgba> {
         let key = value_type_key(raw);
+        if let Some(style) = self
+            .color_config
+            .value_styles
+            .get(key)
+            .and_then(|by_value| by_value.get(&style_cache_key(raw)))
+        {
+            return style.bg;
+        }
         self.color_config
             .type_styles
             .get(key)
@@ -228,6 +274,14 @@ impl NushellTableDelegate {
 
     fn cell_bold(&self, raw: &Value) -> bool {
         let key = value_type_key(raw);
+        if let Some(style) = self
+            .color_config
+            .value_styles
+            .get(key)
+            .and_then(|by_value| by_value.get(&style_cache_key(raw)))
+        {
+            return style.bold;
+        }
         self.color_config
             .type_styles
             .get(key)
@@ -235,53 +289,56 @@ impl NushellTableDelegate {
             .unwrap_or(false)
     }
 
+    fn ls_key_for_row_type(&self, real_row: usize) -> Option<&'static str> {
+        let type_col_ix = self
+            .columns
+            .iter()
+            .position(|c| c.name.eq_ignore_ascii_case("type"))?;
+        let row_ty = self
+            .all_rows
+            .get(real_row)
+            .and_then(|r| r.get(type_col_ix))
+            .map(|s| s.to_lowercase())
+            .unwrap_or_default();
+        match row_ty.as_str() {
+            "dir" | "directory" => Some("di"),
+            "symlink" | "link" => Some("ln"),
+            "pipe" => Some("pi"),
+            "socket" => Some("so"),
+            "block" | "block_device" => Some("bd"),
+            "char" | "char_device" => Some("cd"),
+            "file" => Some("fi"),
+            _ => None,
+        }
+    }
+
     fn ls_fg_for_name_cell(&self, real_row: usize, col_ix: usize) -> Option<Rgba> {
         let col_name = self.columns.get(col_ix).map(|c| c.name.to_lowercase())?;
-        if col_name != "name" {
+        if col_name != "name" && col_name != "type" {
             return None;
         }
 
-        let name = self
-            .all_rows
-            .get(real_row)
-            .and_then(|r| r.get(col_ix))
-            .map(|s| s.as_str())
-            .unwrap_or_default();
+        if col_name == "name" {
+            let name = self
+                .all_rows
+                .get(real_row)
+                .and_then(|r| r.get(col_ix))
+                .map(|s| s.as_str())
+                .unwrap_or_default();
 
-        if let Some(dot) = name.rfind('.') {
-            if dot + 1 < name.len() {
-                let ext = &name[dot + 1..];
-                if let Some(c) = self.color_config.ls_colors.get(&format!("*.{}", ext)) {
-                    return Some(*c);
+            if let Some(dot) = name.rfind('.') {
+                if dot + 1 < name.len() {
+                    let ext = &name[dot + 1..];
+                    if let Some(c) = self.color_config.ls_colors.get(&format!("*.{}", ext)) {
+                        return Some(*c);
+                    }
                 }
             }
         }
 
-        let type_col_ix = self
-            .columns
-            .iter()
-            .position(|c| c.name.eq_ignore_ascii_case("type"));
-        if let Some(type_col_ix) = type_col_ix {
-            let row_ty = self
-                .all_rows
-                .get(real_row)
-                .and_then(|r| r.get(type_col_ix))
-                .map(|s| s.to_lowercase())
-                .unwrap_or_default();
-            let ls_key = match row_ty.as_str() {
-                "dir" | "directory" => Some("di"),
-                "symlink" | "link" => Some("ln"),
-                "pipe" => Some("pi"),
-                "socket" => Some("so"),
-                "block" | "block_device" => Some("bd"),
-                "char" | "char_device" => Some("cd"),
-                "file" => Some("fi"),
-                _ => None,
-            };
-            if let Some(ls_key) = ls_key {
-                if let Some(c) = self.color_config.ls_colors.get(ls_key) {
-                    return Some(*c);
-                }
+        if let Some(ls_key) = self.ls_key_for_row_type(real_row) {
+            if let Some(c) = self.color_config.ls_colors.get(ls_key) {
+                return Some(*c);
             }
         }
 
@@ -298,7 +355,7 @@ fn value_type_key(v: &Value) -> &'static str {
         Value::String { .. }   => "string",
         Value::Filesize { .. } => "filesize",
         Value::Duration { .. } => "duration",
-        Value::Date { .. }     => "datetime",
+        Value::Date { .. }     => "date",
         Value::Range { .. }    => "range",
         Value::Record { .. }   => "record",
         Value::List { .. }     => "list",
@@ -515,6 +572,10 @@ impl TableDelegate for NushellTableDelegate {
         let fg   = self.ls_fg_for_name_cell(real_row, col_ix).or_else(|| self.cell_fg(raw));
         let bg   = self.cell_bg(raw);
         let bold = self.cell_bold(raw);
+        let numeric = matches!(
+            raw,
+            Value::Int { .. } | Value::Float { .. } | Value::Filesize { .. } | Value::Duration { .. }
+        );
 
         let mut div = gpui::div().size_full();
         if let Some(segments) = parse_ansi_segments(&text) {
@@ -536,6 +597,9 @@ impl TableDelegate for NushellTableDelegate {
         if let Some(c) = fg { div = div.text_color(c); }
         if let Some(c) = bg { div = div.bg(c); }
         if bold { div = div.font_weight(FontWeight::BOLD); }
+        if numeric {
+            div = div.h_flex().justify_end();
+        }
         div = div
             .on_mouse_down(MouseButton::Left, cx.listener(move |table, _, _, _cx| {
                 table.delegate_mut().last_clicked_col = Some(col_ix);
@@ -1174,6 +1238,9 @@ fn ideal_window_size(table: &TableData, autosize: bool) -> Size<Pixels> {
     const MAX_W: f32 = 1600.0;
     const MIN_H: f32 = 280.0;
     const MAX_H: f32 = 1024.0;
+    const CHAR_W: f32 = 8.0;
+    const CELL_EXTRA_W: f32 = 20.0;
+    const HEADER_EXTRA_W: f32 = 52.0;
 
     let total_col_w: f32 = table.columns.iter().enumerate().map(|(col_ix, col_name)| {
         if autosize {
@@ -1181,10 +1248,11 @@ fn ideal_window_size(table: &TableData, autosize: bool) -> Size<Pixels> {
                 .rows
                 .iter()
                 .map(|row| row.get(col_ix).map(|s| s.len()).unwrap_or(0))
-                .chain(std::iter::once(col_name.len()))
                 .max()
                 .unwrap_or(0);
-            (max_len as f32) * 8.0 + 20.0
+            let cell_w = (max_len as f32) * CHAR_W + CELL_EXTRA_W;
+            let header_w = (col_name.len() as f32) * CHAR_W + HEADER_EXTRA_W;
+            cell_w.max(header_w)
         } else {
             100.0 // default Column width
         }

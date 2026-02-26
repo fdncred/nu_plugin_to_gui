@@ -9,7 +9,9 @@ edition = "2024"
 nu-plugin = { path = "C:/Users/us991808/source/repos/forks/nushell/crates/nu-plugin" }
 nu-protocol = { path = "C:/Users/us991808/source/repos/forks/nushell/crates/nu-protocol" }
 nu-color-config = { path = "C:/Users/us991808/source/repos/forks/nushell/crates/nu-color-config" }
+nu-utils = { path = "C:/Users/us991808/source/repos/forks/nushell/crates/nu-utils" }
 nu-ansi-term = "0.50"
+lscolors = "0.20"
 
 # GUI libraries
 gpui = "0.2.2"
