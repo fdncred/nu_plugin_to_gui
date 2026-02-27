@@ -83,22 +83,35 @@ flowchart TD
 
 ### Platform prerequisites
 
-- Linux: install development packages for XCB and XKB before building.
+#### Linux
+
+On Linux and FreeBSD, the build performs an early dependency check and reports missing GUI system libraries with installation hints.
+
+If both `WAYLAND_DISPLAY` and `DISPLAY` are present and Wayland initialization fails, `to gui` automatically retries with X11. Set `TO_GUI_FORCE_WAYLAND=1` to disable this fallback.
+
+- install development packages for XCB and XKB before building.
 	- Debian/Ubuntu: `sudo apt install libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev`
 	- Fedora: `sudo dnf install libxcb-devel libxkbcommon-devel libxkbcommon-x11-devel`
 	- Arch: `sudo pacman -S libxcb libxkbcommon xorg-xkbcommon`
-- macOS: install Xcode Command Line Tools (`xcode-select --install`).
-- Windows: use the MSVC Rust target (`x86_64-pc-windows-msvc`) with Visual Studio Build Tools.
 
+#### MacOS
+
+On macOS, this project enables `gpui` runtime shader compilation (`runtime_shaders`) to avoid requiring the separate Metal Toolchain component during `cargo build`.
+
+	- Install Xcode Command Line Tools: `xcode-select --install`
+	- If prompted, open Xcode once and accept the license.
+
+#### Windows
+- use the MSVC Rust target (`x86_64-pc-windows-msvc`) with Visual Studio Build Tools.
+
+### Building
 1. Clone the repository and ensure you have Rust installed (edition 2024).
 2. Run `cargo build` to compile the project or `cargo install --path .`. Dependencies are fetched from the Nushell GitHub repo.
 3. Register the plugin with `plugin add /path/to/nu_plugin_to_gui`.
 4. Restart or use the plugin with `plugin use /path/to/nu_plugin_to_gui`
 5. Try it out `ls | to gui`
 
-On Linux and FreeBSD, the build now performs an early dependency check and reports missing GUI system libraries with installation hints.
-
-If both `WAYLAND_DISPLAY` and `DISPLAY` are present and Wayland initialization fails, `to gui` automatically retries with X11. Set `TO_GUI_FORCE_WAYLAND=1` to disable this fallback.
+`to gui` launches the window asynchronously: Nushell returns to the prompt immediately while the GUI stays open in its own app event loop.
 
 _Note:_ the project is in early development and primarily intended for internal tooling or experimentation.
 

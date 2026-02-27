@@ -79,16 +79,32 @@ impl PluginCommand for ToGuiCommand {
         );
 
         #[cfg(not(test))]
-        if let Err(err) = crate::gui::run_table_gui(
-            table,
-            initial_filter,
-            autosize,
-            color_config,
-            save_dir,
-            closure_sources,
-            (*nu_config).clone(),
-            rfc3339,
-        ) {
+        let gui_result = if crate::gui_dispatch::has_main_thread_dispatch() {
+            crate::gui_dispatch::run_table_gui_on_main_thread(
+                table,
+                initial_filter,
+                autosize,
+                color_config,
+                save_dir,
+                closure_sources,
+                (*nu_config).clone(),
+                rfc3339,
+            )
+        } else {
+            crate::gui::run_table_gui(
+                table,
+                initial_filter,
+                autosize,
+                color_config,
+                save_dir,
+                closure_sources,
+                (*nu_config).clone(),
+                rfc3339,
+            )
+        };
+
+        #[cfg(not(test))]
+        if let Err(err) = gui_result {
             return Err(LabeledError::new(format!(
                 "to gui: failed to launch GUI: {err:#}"
             )));

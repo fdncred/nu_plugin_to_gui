@@ -9,19 +9,19 @@ use crate::TableData;
 use crate::color_utils::{style_cache_key, value_type_key};
 use crate::gui_ansi::parse_ansi_segments;
 use crate::window_sizing::ideal_window_size;
-use nu_protocol::{Config, Value};
+use anyhow::{Result, anyhow};
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
-use gpui_component::{Root, StyledExt, Theme, ThemeMode};
 use gpui_component::button::{Button, ButtonVariants as _};
-use gpui_component::table::{Table, TableDelegate, TableState, TableEvent, Column, ColumnSort};
-use gpui_component::input::{Input, InputState, InputEvent};
+use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::menu::{DropdownMenu as _, PopupMenu, PopupMenuItem};
+use gpui_component::table::{Column, ColumnSort, Table, TableDelegate, TableEvent, TableState};
+use gpui_component::{Root, StyledExt, Theme, ThemeMode};
+use nu_protocol::{Config, Value};
+use std::any::Any;
 use std::collections::HashMap;
-use anyhow::{Result, anyhow};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::any::Any;
 
 // json value type alias to avoid collision with `nu_protocol::Value`.
 use serde_json::Value as JsonValue;
@@ -95,13 +95,22 @@ macro_rules! define_action {
         struct $name;
 
         impl gpui::Action for $name {
-            fn boxed_clone(&self) -> Box<dyn gpui::Action> { Box::new(self.clone()) }
+            fn boxed_clone(&self) -> Box<dyn gpui::Action> {
+                Box::new(self.clone())
+            }
             fn partial_eq(&self, action: &dyn gpui::Action) -> bool {
                 action.as_any().downcast_ref::<$name>().is_some()
             }
-            fn name(&self) -> &'static str { $id }
-            fn name_for_type() -> &'static str { $id }
-            fn build(_value: JsonValue) -> gpui::Result<Box<dyn gpui::Action>> where Self: Sized {
+            fn name(&self) -> &'static str {
+                $id
+            }
+            fn name_for_type() -> &'static str {
+                $id
+            }
+            fn build(_value: JsonValue) -> gpui::Result<Box<dyn gpui::Action>>
+            where
+                Self: Sized,
+            {
                 Ok(Box::new($name))
             }
         }
@@ -235,7 +244,10 @@ impl NushellTableDelegate {
             .filter(|&ix| {
                 let row = &self.all_rows[ix];
                 if let Some(ref pat) = global {
-                    if !row.iter().any(|cell| cell.to_lowercase().contains(pat.as_str())) {
+                    if !row
+                        .iter()
+                        .any(|cell| cell.to_lowercase().contains(pat.as_str()))
+                    {
                         return false;
                     }
                 }
@@ -406,9 +418,15 @@ impl NushellTableDelegate {
 }
 
 impl TableDelegate for NushellTableDelegate {
-    fn columns_count(&self, _: &App) -> usize { self.columns.len() }
-    fn rows_count(&self, _: &App) -> usize { self.visible_rows.len() }
-    fn column(&self, col_ix: usize, _: &App) -> &Column { &self.columns[col_ix] }
+    fn columns_count(&self, _: &App) -> usize {
+        self.columns.len()
+    }
+    fn rows_count(&self, _: &App) -> usize {
+        self.visible_rows.len()
+    }
+    fn column(&self, col_ix: usize, _: &App) -> &Column {
+        &self.columns[col_ix]
+    }
 
     fn render_th(
         &mut self,
@@ -453,17 +471,19 @@ impl TableDelegate for NushellTableDelegate {
     ) -> impl IntoElement {
         let real_row = self.visible_rows[row_ix];
         let text = self.all_rows[real_row][col_ix].clone();
-        let raw  = &self.raw_rows[real_row][col_ix];
+        let raw = &self.raw_rows[real_row][col_ix];
         let key_style = if self.is_transposed_key_column(col_ix) {
             self.cellpath_style()
         } else {
             None
         };
-        let fg   = self
+        let fg = self
             .ls_fg_for_name_cell(real_row, col_ix)
             .or_else(|| key_style.and_then(|style| style.fg))
             .or_else(|| self.cell_fg(raw));
-        let bg   = key_style.and_then(|style| style.bg).or_else(|| self.cell_bg(raw));
+        let bg = key_style
+            .and_then(|style| style.bg)
+            .or_else(|| self.cell_bg(raw));
         let bold = key_style
             .map(|style| style.bold)
             .unwrap_or_else(|| self.cell_bold(raw));
@@ -493,19 +513,29 @@ impl TableDelegate for NushellTableDelegate {
                 div = div.text_color(c);
             }
         }
-        if let Some(c) = bg { div = div.bg(c); }
-        if bold && !has_ansi_segments { div = div.font_weight(FontWeight::BOLD); }
+        if let Some(c) = bg {
+            div = div.bg(c);
+        }
+        if bold && !has_ansi_segments {
+            div = div.font_weight(FontWeight::BOLD);
+        }
         if numeric {
             div = div.h_flex().justify_end();
         }
         div = div
-            .on_mouse_down(MouseButton::Left, cx.listener(move |table, _, _, _cx| {
-                table.delegate_mut().last_clicked_col = Some(col_ix);
-            }))
-            .on_mouse_down(MouseButton::Right, cx.listener(move |table, _, _, _cx| {
-                table.delegate_mut().last_clicked_col = Some(col_ix);
-                table.delegate_mut().right_clicked_col = Some(col_ix);
-            }));
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |table, _, _, _cx| {
+                    table.delegate_mut().last_clicked_col = Some(col_ix);
+                }),
+            )
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |table, _, _, _cx| {
+                    table.delegate_mut().last_clicked_col = Some(col_ix);
+                    table.delegate_mut().right_clicked_col = Some(col_ix);
+                }),
+            );
         div
     }
 
@@ -517,12 +547,13 @@ impl TableDelegate for NushellTableDelegate {
         _: &mut Context<TableState<Self>>,
     ) {
         match sort {
-            ColumnSort::Ascending  =>
-                self.visible_rows.sort_by(|a, b| self.all_rows[*a][col_ix].cmp(&self.all_rows[*b][col_ix])),
-            ColumnSort::Descending =>
-                self.visible_rows.sort_by(|a, b| self.all_rows[*b][col_ix].cmp(&self.all_rows[*a][col_ix])),
-            ColumnSort::Default    =>
-                self.visible_rows = self.original_order.clone(),
+            ColumnSort::Ascending => self
+                .visible_rows
+                .sort_by(|a, b| self.all_rows[*a][col_ix].cmp(&self.all_rows[*b][col_ix])),
+            ColumnSort::Descending => self
+                .visible_rows
+                .sort_by(|a, b| self.all_rows[*b][col_ix].cmp(&self.all_rows[*a][col_ix])),
+            ColumnSort::Default => self.visible_rows = self.original_order.clone(),
         }
     }
 
@@ -541,11 +572,9 @@ impl TableDelegate for NushellTableDelegate {
             .and_then(|r| r.get(col_ix))
             .cloned()
             .unwrap_or_default();
-        menu.item(
-            PopupMenuItem::new("Copy").on_click(move |_, _, cx| {
-                cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
-            }),
-        )
+        menu.item(PopupMenuItem::new("Copy").on_click(move |_, _, cx| {
+            cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
+        }))
     }
 }
 
@@ -655,49 +684,54 @@ impl ToGuiView {
         let suggested_name = "to-gui-output.json".to_string();
         let receiver = cx.prompt_for_new_path(&base_dir, Some(&suggested_name));
 
-        cx.spawn(move |view: WeakEntity<ToGuiView>, async_cx: &mut AsyncApp| {
-            let mut async_cx = async_cx.clone();
-            async move {
-            let chosen = match receiver.await {
-                Ok(Ok(path_opt)) => path_opt,
-                Ok(Err(err)) => {
-                    let message = format!("Save failed: {}", err);
-                    let _ = view.update(&mut async_cx, |view, cx| {
-                        view.status_message = message;
-                        cx.notify();
-                    });
-                    return;
-                }
-                Err(err) => {
-                    let message = format!("Save failed: {}", err);
-                    let _ = view.update(&mut async_cx, |view, cx| {
-                        view.status_message = message;
-                        cx.notify();
-                    });
-                    return;
-                }
-            };
-
-            match chosen {
-                Some(path) => {
-                    let display = path.display().to_string();
-                    let _ = view.update(&mut async_cx, |view, cx| {
-                        match view.save_root_json_to(&path) {
-                            Ok(()) => view.status_message = format!("Saved: {}", display),
-                            Err(err) => view.status_message = format!("Save failed: {}", err),
+        cx.spawn(
+            move |view: WeakEntity<ToGuiView>, async_cx: &mut AsyncApp| {
+                let mut async_cx = async_cx.clone();
+                async move {
+                    let chosen = match receiver.await {
+                        Ok(Ok(path_opt)) => path_opt,
+                        Ok(Err(err)) => {
+                            let message = format!("Save failed: {}", err);
+                            let _ = view.update(&mut async_cx, |view, cx| {
+                                view.status_message = message;
+                                cx.notify();
+                            });
+                            return;
                         }
-                        cx.notify();
-                    });
+                        Err(err) => {
+                            let message = format!("Save failed: {}", err);
+                            let _ = view.update(&mut async_cx, |view, cx| {
+                                view.status_message = message;
+                                cx.notify();
+                            });
+                            return;
+                        }
+                    };
+
+                    match chosen {
+                        Some(path) => {
+                            let display = path.display().to_string();
+                            let _ = view.update(&mut async_cx, |view, cx| {
+                                match view.save_root_json_to(&path) {
+                                    Ok(()) => view.status_message = format!("Saved: {}", display),
+                                    Err(err) => {
+                                        view.status_message = format!("Save failed: {}", err)
+                                    }
+                                }
+                                cx.notify();
+                            });
+                        }
+                        None => {
+                            let _ = view.update(&mut async_cx, |view, cx| {
+                                view.status_message = "Save canceled".to_string();
+                                cx.notify();
+                            });
+                        }
+                    }
                 }
-                None => {
-                    let _ = view.update(&mut async_cx, |view, cx| {
-                        view.status_message = "Save canceled".to_string();
-                        cx.notify();
-                    });
-                }
-            }
-        }
-        }).detach();
+            },
+        )
+        .detach();
     }
 
     /// Create the filter widgets and table-state entity for a given `TableData`.
@@ -711,10 +745,7 @@ impl ToGuiView {
         closure_sources: Arc<HashMap<usize, String>>,
         table_config: Arc<Config>,
         rfc3339: bool,
-    ) -> (
-        Entity<InputState>,
-        Entity<TableState<NushellTableDelegate>>,
-    ) {
+    ) -> (Entity<InputState>, Entity<TableState<NushellTableDelegate>>) {
         // Per-column filter inputs — owned by the delegate, rendered inside headers.
         let col_inputs: Vec<Entity<InputState>> = (0..data.columns.len())
             .map(|_| cx.new(|cx| InputState::new(window, cx)))
@@ -744,10 +775,12 @@ impl ToGuiView {
             if let InputEvent::Change = event {
                 let s = input.read(cx).value().to_string();
                 ts2.update(cx, |t, _| {
-                    t.delegate_mut().set_filter(if s.is_empty() { None } else { Some(s) });
+                    t.delegate_mut()
+                        .set_filter(if s.is_empty() { None } else { Some(s) });
                 });
             }
-        }).detach();
+        })
+        .detach();
 
         // Per-column filter subscriptions
         for (col_ix, inp) in col_inputs_for_subs.iter().enumerate() {
@@ -762,7 +795,8 @@ impl ToGuiView {
                         );
                     });
                 }
-            }).detach();
+            })
+            .detach();
         }
 
         // Apply initial global filter
@@ -773,8 +807,8 @@ impl ToGuiView {
 
         // Subscribe to DoubleClickedRow to navigate into nested values
         let data_clone = data.clone();
-        let autosize_c  = autosize;
-        let cc_clone    = cc.clone();
+        let autosize_c = autosize;
+        let cc_clone = cc.clone();
         let closure_sources_c = closure_sources.clone();
         let table_config_c = table_config.clone();
         cx.subscribe_in(&ts, window, move |view, _state, event, window, cx| {
@@ -878,7 +912,9 @@ impl ToGuiView {
         }
     }
 
-    fn can_go_back(&self) -> bool { self.nav_stack.len() > 1 }
+    fn can_go_back(&self) -> bool {
+        self.nav_stack.len() > 1
+    }
 
     fn current_title(&self) -> String {
         self.nav_stack
@@ -891,7 +927,7 @@ impl ToGuiView {
 impl Render for ToGuiView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<ToGuiView>) -> impl IntoElement {
         let can_back = self.can_go_back();
-        let title    = self.current_title();
+        let title = self.current_title();
         let weak = cx.weak_entity();
         let weak2 = cx.weak_entity();
 
@@ -923,12 +959,15 @@ impl Render for ToGuiView {
                         }))
                         .separator()
                         .item(PopupMenuItem::new("Close").on_click(move |_, _, cx| {
-                            close_weak.update(cx, |view, cx| {
-                                view.status_message = "Close is not implemented yet".to_string();
-                                cx.notify();
-                            }).ok();
+                            close_weak
+                                .update(cx, |view, cx| {
+                                    view.status_message =
+                                        "Close is not implemented yet".to_string();
+                                    cx.notify();
+                                })
+                                .ok();
                         }))
-                    })
+                    }),
             )
             .child(
                 Button::new("menu-edit")
@@ -940,25 +979,32 @@ impl Render for ToGuiView {
                         let weak_edit_redo = weak_edit.clone();
                         let weak_edit_copy = weak_edit.clone();
                         menu.item(PopupMenuItem::new("Undo").on_click(move |_, _, cx| {
-                            weak_edit_undo.update(cx, |view, cx| {
-                                view.status_message = "Undo is not implemented yet".to_string();
-                                cx.notify();
-                            }).ok();
+                            weak_edit_undo
+                                .update(cx, |view, cx| {
+                                    view.status_message = "Undo is not implemented yet".to_string();
+                                    cx.notify();
+                                })
+                                .ok();
                         }))
                         .item(PopupMenuItem::new("Redo").on_click(move |_, _, cx| {
-                            weak_edit_redo.update(cx, |view, cx| {
-                                view.status_message = "Redo is not implemented yet".to_string();
-                                cx.notify();
-                            }).ok();
+                            weak_edit_redo
+                                .update(cx, |view, cx| {
+                                    view.status_message = "Redo is not implemented yet".to_string();
+                                    cx.notify();
+                                })
+                                .ok();
                         }))
                         .separator()
                         .item(PopupMenuItem::new("Copy").on_click(move |_, _, cx| {
-                            weak_edit_copy.update(cx, |view, cx| {
-                                view.status_message = "Use right-click on a cell to copy".to_string();
-                                cx.notify();
-                            }).ok();
+                            weak_edit_copy
+                                .update(cx, |view, cx| {
+                                    view.status_message =
+                                        "Use right-click on a cell to copy".to_string();
+                                    cx.notify();
+                                })
+                                .ok();
                         }))
-                    })
+                    }),
             )
             .child(
                 Button::new("menu-view")
@@ -969,18 +1015,22 @@ impl Render for ToGuiView {
                         let weak_view_reload = weak_view.clone();
                         let weak_view_zoomin = weak_view.clone();
                         menu.item(PopupMenuItem::new("Refresh").on_click(move |_, _, cx| {
-                            weak_view_reload.update(cx, |view, cx| {
-                                view.status_message = "Refreshed".to_string();
-                                cx.notify();
-                            }).ok();
+                            weak_view_reload
+                                .update(cx, |view, cx| {
+                                    view.status_message = "Refreshed".to_string();
+                                    cx.notify();
+                                })
+                                .ok();
                         }))
                         .item(PopupMenuItem::new("Zoom In").on_click(move |_, _, cx| {
-                            weak_view_zoomin.update(cx, |view, cx| {
-                                view.status_message = "Zoom is not implemented yet".to_string();
-                                cx.notify();
-                            }).ok();
+                            weak_view_zoomin
+                                .update(cx, |view, cx| {
+                                    view.status_message = "Zoom is not implemented yet".to_string();
+                                    cx.notify();
+                                })
+                                .ok();
                         }))
-                    })
+                    }),
             )
             .child(
                 Button::new("menu-options")
@@ -990,12 +1040,15 @@ impl Render for ToGuiView {
                     .dropdown_menu(move |menu, _, _| {
                         let weak_options_pref = weak_options.clone();
                         menu.item(PopupMenuItem::new("Preferences").on_click(move |_, _, cx| {
-                            weak_options_pref.update(cx, |view, cx| {
-                                view.status_message = "Preferences are not implemented yet".to_string();
-                                cx.notify();
-                            }).ok();
+                            weak_options_pref
+                                .update(cx, |view, cx| {
+                                    view.status_message =
+                                        "Preferences are not implemented yet".to_string();
+                                    cx.notify();
+                                })
+                                .ok();
                         }))
-                    })
+                    }),
             )
             .child(
                 Button::new("menu-window")
@@ -1005,12 +1058,15 @@ impl Render for ToGuiView {
                     .dropdown_menu(move |menu, _, _| {
                         let weak_window_min = weak_window.clone();
                         menu.item(PopupMenuItem::new("Minimize").on_click(move |_, _, cx| {
-                            weak_window_min.update(cx, |view, cx| {
-                                view.status_message = "Minimize is not implemented yet".to_string();
-                                cx.notify();
-                            }).ok();
+                            weak_window_min
+                                .update(cx, |view, cx| {
+                                    view.status_message =
+                                        "Minimize is not implemented yet".to_string();
+                                    cx.notify();
+                                })
+                                .ok();
                         }))
-                    })
+                    }),
             )
             .child(
                 Button::new("menu-help")
@@ -1020,12 +1076,14 @@ impl Render for ToGuiView {
                     .dropdown_menu(move |menu, _, _| {
                         let weak_help_about = weak_help.clone();
                         menu.item(PopupMenuItem::new("About").on_click(move |_, _, cx| {
-                            weak_help_about.update(cx, |view, cx| {
-                                view.status_message = "to-gui plugin".to_string();
-                                cx.notify();
-                            }).ok();
+                            weak_help_about
+                                .update(cx, |view, cx| {
+                                    view.status_message = "to-gui plugin".to_string();
+                                    cx.notify();
+                                })
+                                .ok();
                         }))
-                    })
+                    }),
             );
 
         // In-window toolbar (visible on all platforms; primary on Windows/Linux)
@@ -1071,9 +1129,11 @@ impl Render for ToGuiView {
                     .text_color(rgb(0xffffff))
                     .cursor_pointer()
                     .on_click(move |_, _window, cx| {
-                        weak2.update(cx, |view, cx| {
-                            view.start_save_as(cx);
-                        }).ok();
+                        weak2
+                            .update(cx, |view, cx| {
+                                view.start_save_as(cx);
+                            })
+                            .ok();
                     })
                     .child("💾 Save"),
             );
@@ -1088,16 +1148,13 @@ impl Render for ToGuiView {
             .border_t_1()
             .border_color(rgb(0x1f2937))
             .child(
-                gpui::div()
-                    .flex_shrink_0()
-                    .w_40()
-                    .child(
-                        Input::new(&self.filter_input)
-                            .cleanable(true)
-                            .appearance(false)
-                            .bordered(false)
-                            .focus_bordered(false),
-                    ),
+                gpui::div().flex_shrink_0().w_40().child(
+                    Input::new(&self.filter_input)
+                        .cleanable(true)
+                        .appearance(false)
+                        .bordered(false)
+                        .focus_bordered(false),
+                ),
             )
             .child(
                 gpui::div()
@@ -1206,6 +1263,13 @@ pub fn run_table_gui(
         Theme::change(ThemeMode::Dark, None, cx);
         cx.activate(true);
 
+        cx.on_window_closed(|cx| {
+            if cx.windows().is_empty() {
+                cx.quit();
+            }
+        })
+        .detach();
+
         // On macOS the system menu bar picks this up.
         // On Windows/Linux it is a no-op, but the in-window toolbar above
         // provides the same functionality.
@@ -1259,13 +1323,16 @@ pub fn run_table_gui(
         let table_config2 = table_config.clone();
         let rfc3339_2 = rfc3339;
         cx.on_action::<SaveAction>(move |_, _app| {
-            let json_rows: Vec<serde_json::Value> = ts.rows.iter()
+            let json_rows: Vec<serde_json::Value> = ts
+                .rows
+                .iter()
                 .map(|row| {
-                    let obj: serde_json::Map<String, serde_json::Value> =
-                        ts.columns.iter()
-                            .zip(row.iter())
-                            .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
-                            .collect();
+                    let obj: serde_json::Map<String, serde_json::Value> = ts
+                        .columns
+                        .iter()
+                        .zip(row.iter())
+                        .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
+                        .collect();
                     serde_json::Value::Object(obj)
                 })
                 .collect();
@@ -1368,13 +1435,21 @@ mod tests {
     use super::*;
 
     fn make_table(cols: Vec<&str>, rows: Vec<Vec<&str>>) -> TableData {
-        use nu_protocol::{Value, Span};
-        let raw: Vec<Vec<Value>> = rows.iter()
-            .map(|r| r.iter().map(|s| Value::string(s.to_string(), Span::unknown())).collect())
+        use nu_protocol::{Span, Value};
+        let raw: Vec<Vec<Value>> = rows
+            .iter()
+            .map(|r| {
+                r.iter()
+                    .map(|s| Value::string(s.to_string(), Span::unknown()))
+                    .collect()
+            })
             .collect();
         TableData {
             columns: cols.into_iter().map(|s| s.to_string()).collect(),
-            rows: rows.into_iter().map(|r| r.into_iter().map(|s| s.to_string()).collect()).collect(),
+            rows: rows
+                .into_iter()
+                .map(|r| r.into_iter().map(|s| s.to_string()).collect())
+                .collect(),
             raw,
         }
     }
@@ -1410,7 +1485,8 @@ mod tests {
         let table = make_table(vec!["a"], vec![vec!["2"], vec!["1"]]);
         let mut d = NushellTableDelegate::new(table, false, ColorConfig::default(), vec![]);
         assert_eq!(d.visible_rows, vec![0, 1]);
-        d.visible_rows.sort_by(|a, b| d.all_rows[*a][0].cmp(&d.all_rows[*b][0]));
+        d.visible_rows
+            .sort_by(|a, b| d.all_rows[*a][0].cmp(&d.all_rows[*b][0]));
         assert_eq!(d.visible_rows, vec![1, 0]);
         d.visible_rows = d.original_order.clone();
         assert_eq!(d.visible_rows, vec![0, 1]);
@@ -1452,10 +1528,13 @@ mod tests {
 
     #[test]
     fn value_type_key_mapping() {
-        use nu_protocol::{Value, Span};
-        assert_eq!(value_type_key(&Value::int(1, Span::unknown())),    "int");
+        use nu_protocol::{Span, Value};
+        assert_eq!(value_type_key(&Value::int(1, Span::unknown())), "int");
         assert_eq!(value_type_key(&Value::float(1.0, Span::unknown())), "float");
-        assert_eq!(value_type_key(&Value::string("", Span::unknown())), "string");
+        assert_eq!(
+            value_type_key(&Value::string("", Span::unknown())),
+            "string"
+        );
         assert_eq!(value_type_key(&Value::bool(true, Span::unknown())), "bool");
     }
 
@@ -1490,10 +1569,7 @@ mod tests {
     #[test]
     fn ideal_window_size_clamped() {
         // Even a very wide table should not exceed MAX_W
-        let wide = make_table(
-            (0..100).map(|_| "col").collect(),
-            vec![],
-        );
+        let wide = make_table((0..100).map(|_| "col").collect(), vec![]);
         let sz = ideal_window_size(&wide, false);
         assert!(sz.width <= px(1600.0));
         assert!(sz.width >= px(400.0));

@@ -4,12 +4,14 @@
 //! Contains the plugin command, color/config helpers, GUI entrypoints, and
 //! conversion utilities used by `src/main.rs`.
 
-#[cfg(not(test))]
-pub mod gui;
 pub mod color_config;
 pub mod color_utils;
 #[cfg(not(test))]
+pub mod gui;
+#[cfg(not(test))]
 pub mod gui_ansi;
+#[cfg(not(test))]
+pub mod gui_dispatch;
 pub mod plugin_command;
 pub mod table_data;
 pub mod value_conv;
@@ -31,7 +33,8 @@ pub struct CellStyle {
 #[derive(Clone, Default)]
 pub struct ColorConfig {
     pub type_styles: std::collections::HashMap<String, CellStyle>,
-    pub value_styles: std::collections::HashMap<String, std::collections::HashMap<String, CellStyle>>,
+    pub value_styles:
+        std::collections::HashMap<String, std::collections::HashMap<String, CellStyle>>,
     pub default_style: CellStyle,
     pub use_ls_colors: bool,
     pub header_style: CellStyle,
