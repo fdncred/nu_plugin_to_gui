@@ -25,6 +25,7 @@ fn signature_has_expected_flags() {
     let flag_names: Vec<&str> = sig.named.iter().map(|f| f.long.as_str()).collect();
     assert!(flag_names.contains(&"no-transpose"), "missing --no-transpose flag");
     assert!(flag_names.contains(&"no-autosize"),  "missing --no-autosize flag");
+    assert!(flag_names.contains(&"rfc3339"),      "missing --rfc3339 flag");
     assert!(flag_names.contains(&"filter"),        "missing --filter flag");
 }
 

@@ -8,7 +8,9 @@
 //! table.
 
 use crate::TableData;
-use crate::color_utils::{ansi_16_fg, style_cache_key, value_type_key, xterm_256_to_rgb};
+use crate::color_utils::{style_cache_key, value_type_key};
+use crate::gui_ansi::parse_ansi_segments;
+use crate::window_sizing::ideal_window_size;
 use nu_protocol::{Config, Value};
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
@@ -88,39 +90,44 @@ fn numeric_type_key_for_value(v: &Value) -> Option<&'static str> {
 // Actions
 // ---------------------------------------------------------------------------
 
-/// Action for File → Save.
-#[derive(Clone, PartialEq)]
-struct SaveAction;
+macro_rules! define_action {
+    ($name:ident, $id:literal) => {
+        #[derive(Clone, PartialEq)]
+        struct $name;
 
-impl gpui::Action for SaveAction {
-    fn boxed_clone(&self) -> Box<dyn gpui::Action> { Box::new(self.clone()) }
-    fn partial_eq(&self, action: &dyn gpui::Action) -> bool {
-        action.as_any().downcast_ref::<SaveAction>().is_some()
-    }
-    fn name(&self) -> &'static str { "to-gui::save" }
-    fn name_for_type() -> &'static str { "to-gui::save" }
-    fn build(_value: JsonValue) -> gpui::Result<Box<dyn gpui::Action>> where Self: Sized {
-        Ok(Box::new(SaveAction))
-    }
+        impl gpui::Action for $name {
+            fn boxed_clone(&self) -> Box<dyn gpui::Action> { Box::new(self.clone()) }
+            fn partial_eq(&self, action: &dyn gpui::Action) -> bool {
+                action.as_any().downcast_ref::<$name>().is_some()
+            }
+            fn name(&self) -> &'static str { $id }
+            fn name_for_type() -> &'static str { $id }
+            fn build(_value: JsonValue) -> gpui::Result<Box<dyn gpui::Action>> where Self: Sized {
+                Ok(Box::new($name))
+            }
+        }
+
+        gpui::register_action!($name);
+    };
 }
-gpui::register_action!(SaveAction);
 
-/// Action emitted by the "Back" button.
-#[derive(Clone, PartialEq)]
-struct BackAction;
+// Action for File → Save.
+define_action!(SaveAction, "to-gui::save");
+define_action!(CloseAction, "to-gui::close");
+define_action!(UndoAction, "to-gui::undo");
+define_action!(RedoAction, "to-gui::redo");
+define_action!(CopyAction, "to-gui::copy");
+define_action!(PasteAction, "to-gui::paste");
+define_action!(ReloadAction, "to-gui::reload");
+define_action!(ZoomInAction, "to-gui::zoom-in");
+define_action!(ZoomOutAction, "to-gui::zoom-out");
+define_action!(PreferencesAction, "to-gui::preferences");
+define_action!(MinimizeAction, "to-gui::minimize");
+define_action!(ZoomWindowAction, "to-gui::zoom-window");
+define_action!(AboutAction, "to-gui::about");
 
-impl gpui::Action for BackAction {
-    fn boxed_clone(&self) -> Box<dyn gpui::Action> { Box::new(self.clone()) }
-    fn partial_eq(&self, action: &dyn gpui::Action) -> bool {
-        action.as_any().downcast_ref::<BackAction>().is_some()
-    }
-    fn name(&self) -> &'static str { "to-gui::back" }
-    fn name_for_type() -> &'static str { "to-gui::back" }
-    fn build(_value: JsonValue) -> gpui::Result<Box<dyn gpui::Action>> where Self: Sized {
-        Ok(Box::new(BackAction))
-    }
-}
-gpui::register_action!(BackAction);
+// Action emitted by the "Back" button.
+define_action!(BackAction, "to-gui::back");
 
 // ---------------------------------------------------------------------------
 // TableDelegate implementation
@@ -397,111 +404,6 @@ impl NushellTableDelegate {
 
         self.color_config.ls_colors.get("fi").copied()
     }
-}
-
-#[derive(Clone, Debug)]
-struct AnsiSegment {
-    text: String,
-    fg: Option<Rgba>,
-    bold: bool,
-}
-
-fn parse_ansi_segments(input: &str) -> Option<Vec<AnsiSegment>> {
-    if !input.contains("\u{1b}[") {
-        return None;
-    }
-
-    let mut segments = Vec::new();
-    let mut buf = String::new();
-    let mut current_fg: Option<Rgba> = None;
-    let mut current_bold = false;
-
-    let bytes = input.as_bytes();
-    let mut i = 0usize;
-    while i < bytes.len() {
-        if bytes[i] == 0x1b && i + 1 < bytes.len() && bytes[i + 1] == b'[' {
-            if !buf.is_empty() {
-                segments.push(AnsiSegment {
-                    text: std::mem::take(&mut buf),
-                    fg: current_fg,
-                    bold: current_bold,
-                });
-            }
-
-            i += 2;
-            let start = i;
-            while i < bytes.len() && bytes[i] != b'm' {
-                i += 1;
-            }
-            if i >= bytes.len() {
-                break;
-            }
-
-            let codes = &input[start..i];
-            let mut nums: Vec<u16> = if codes.is_empty() {
-                vec![0]
-            } else {
-                codes
-                    .split(';')
-                    .filter_map(|s| s.parse::<u16>().ok())
-                    .collect()
-            };
-            if nums.is_empty() {
-                nums.push(0);
-            }
-
-            let mut idx = 0usize;
-            while idx < nums.len() {
-                let code = nums[idx];
-                match code {
-                    0 => {
-                        current_fg = None;
-                        current_bold = false;
-                    }
-                    1 => current_bold = true,
-                    22 => current_bold = false,
-                    39 => current_fg = None,
-                    30..=37 | 90..=97 => {
-                        current_fg = ansi_16_fg(code as u8);
-                    }
-                    38 => {
-                        if idx + 2 < nums.len() && nums[idx + 1] == 5 {
-                            current_fg = Some(xterm_256_to_rgb(nums[idx + 2] as u8));
-                            idx += 2;
-                        } else if idx + 4 < nums.len() && nums[idx + 1] == 2 {
-                            let r = nums[idx + 2] as u32;
-                            let g = nums[idx + 3] as u32;
-                            let b = nums[idx + 4] as u32;
-                            current_fg = Some(rgb((r << 16) | (g << 8) | b));
-                            idx += 4;
-                        }
-                    }
-                    _ => {}
-                }
-                idx += 1;
-            }
-
-            i += 1;
-            continue;
-        }
-
-        if let Some(ch) = input[i..].chars().next() {
-            buf.push(ch);
-            i += ch.len_utf8();
-        } else {
-            break;
-        }
-    }
-
-    if !buf.is_empty() {
-        segments.push(AnsiSegment {
-            text: buf,
-            fg: current_fg,
-            bold: current_bold,
-        });
-    }
-
-    Some(segments)
 }
 
 impl TableDelegate for NushellTableDelegate {
@@ -1212,59 +1114,6 @@ impl Render for ToGuiView {
 }
 
 // ---------------------------------------------------------------------------
-// Window sizing helpers
-// ---------------------------------------------------------------------------
-
-/// Compute a comfortable initial window size that fits the table content.
-///
-/// The width is the sum of all column widths (using the same autosize logic as
-/// `NushellTableDelegate`) plus a small margin for scrollbar and borders.
-/// The height accounts for the toolbar, filter row, header row, and all data
-/// rows.  Both dimensions are clamped to a reasonable range so the window is
-/// never tiny or larger than a standard monitor.
-fn ideal_window_size(table: &TableData, autosize: bool) -> Size<Pixels> {
-    const ROW_H: f32 = 36.0;   // data row
-    const HEADER_H: f32 = 70.0; // column header row (includes embedded filter input)
-    const FILTER_H: f32 = 42.0; // global-filter bar
-    const TOOLBAR_H: f32 = 42.0;
-    const MENU_H: f32 = 44.0;
-    const EXTRA: f32 = 24.0;   // bottom padding / scrollbar
-    const MARGIN_W: f32 = 32.0; // side padding / scrollbar
-    const MIN_W: f32 = 400.0;
-    const MENUBAR_MIN_W: f32 = 640.0;
-    const MAX_W: f32 = 1600.0;
-    const MIN_H: f32 = 280.0;
-    const MAX_H: f32 = 1024.0;
-    const CHAR_W: f32 = 8.0;
-    const CELL_EXTRA_W: f32 = 20.0;
-    const HEADER_EXTRA_W: f32 = 52.0;
-
-    let total_col_w: f32 = table.columns.iter().enumerate().map(|(col_ix, col_name)| {
-        if autosize {
-            let max_len = table
-                .rows
-                .iter()
-                .map(|row| row.get(col_ix).map(|s| s.len()).unwrap_or(0))
-                .max()
-                .unwrap_or(0);
-            let cell_w = (max_len as f32) * CHAR_W + CELL_EXTRA_W;
-            let header_w = (col_name.len() as f32) * CHAR_W + HEADER_EXTRA_W;
-            cell_w.max(header_w)
-        } else {
-            100.0 // default Column width
-        }
-    }).sum();
-
-    let width = (total_col_w + MARGIN_W).clamp(MIN_W.max(MENUBAR_MIN_W), MAX_W);
-    let height = (MENU_H + TOOLBAR_H + FILTER_H + HEADER_H
-        + (table.rows.len() as f32) * ROW_H
-        + EXTRA)
-        .clamp(MIN_H, MAX_H);
-
-    Size { width: px(width), height: px(height) }
-}
-
-// ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
 
@@ -1298,41 +1147,41 @@ pub fn run_table_gui(
                 items: vec![
                     MenuItem::action("Save As…", SaveAction),
                     MenuItem::separator(),
-                    MenuItem::action("Close", SaveAction),
+                    MenuItem::action("Close", CloseAction),
                 ],
             },
             Menu {
                 name: "Edit".into(),
                 items: vec![
-                    MenuItem::action("Undo", SaveAction),
-                    MenuItem::action("Redo", SaveAction),
+                    MenuItem::action("Undo", UndoAction),
+                    MenuItem::action("Redo", RedoAction),
                     MenuItem::separator(),
-                    MenuItem::action("Copy", SaveAction),
-                    MenuItem::action("Paste", SaveAction),
+                    MenuItem::action("Copy", CopyAction),
+                    MenuItem::action("Paste", PasteAction),
                 ],
             },
             Menu {
                 name: "View".into(),
                 items: vec![
-                    MenuItem::action("Reload", SaveAction),
-                    MenuItem::action("Zoom In", SaveAction),
-                    MenuItem::action("Zoom Out", SaveAction),
+                    MenuItem::action("Reload", ReloadAction),
+                    MenuItem::action("Zoom In", ZoomInAction),
+                    MenuItem::action("Zoom Out", ZoomOutAction),
                 ],
             },
             Menu {
                 name: "Options".into(),
-                items: vec![MenuItem::action("Preferences", SaveAction)],
+                items: vec![MenuItem::action("Preferences", PreferencesAction)],
             },
             Menu {
                 name: "Window".into(),
                 items: vec![
-                    MenuItem::action("Minimize", SaveAction),
-                    MenuItem::action("Zoom", SaveAction),
+                    MenuItem::action("Minimize", MinimizeAction),
+                    MenuItem::action("Zoom", ZoomWindowAction),
                 ],
             },
             Menu {
                 name: "Help".into(),
-                items: vec![MenuItem::action("About", SaveAction)],
+                items: vec![MenuItem::action("About", AboutAction)],
             },
         ]);
 
@@ -1357,6 +1206,43 @@ pub fn run_table_gui(
                 let _ = std::fs::write(&path, json);
                 eprintln!("to-gui: saved to {}", path.display());
             }
+        });
+
+        cx.on_action::<CloseAction>(|_, _| {
+            eprintln!("to-gui: Close requested from native menu");
+        });
+        cx.on_action::<UndoAction>(|_, _| {
+            eprintln!("to-gui: Undo requested from native menu");
+        });
+        cx.on_action::<RedoAction>(|_, _| {
+            eprintln!("to-gui: Redo requested from native menu");
+        });
+        cx.on_action::<CopyAction>(|_, _| {
+            eprintln!("to-gui: Copy requested from native menu");
+        });
+        cx.on_action::<PasteAction>(|_, _| {
+            eprintln!("to-gui: Paste requested from native menu");
+        });
+        cx.on_action::<ReloadAction>(|_, _| {
+            eprintln!("to-gui: Reload requested from native menu");
+        });
+        cx.on_action::<ZoomInAction>(|_, _| {
+            eprintln!("to-gui: Zoom In requested from native menu");
+        });
+        cx.on_action::<ZoomOutAction>(|_, _| {
+            eprintln!("to-gui: Zoom Out requested from native menu");
+        });
+        cx.on_action::<PreferencesAction>(|_, _| {
+            eprintln!("to-gui: Preferences requested from native menu");
+        });
+        cx.on_action::<MinimizeAction>(|_, _| {
+            eprintln!("to-gui: Minimize requested from native menu");
+        });
+        cx.on_action::<ZoomWindowAction>(|_, _| {
+            eprintln!("to-gui: Window Zoom requested from native menu");
+        });
+        cx.on_action::<AboutAction>(|_, _| {
+            eprintln!("to-gui: About requested from native menu");
         });
 
         // Center the window on the primary display at the computed size.
