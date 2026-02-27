@@ -554,14 +554,19 @@ impl TableDelegate for NushellTableDelegate {
 // View
 // ---------------------------------------------------------------------------
 
-/// The main view.  Holds a navigation stack and rebuilds the table on push/pop.
-pub struct ToGuiView {
-    /// Navigation stack: (data, breadcrumb title)
-    nav_stack: Vec<(TableData, String)>,
+#[derive(Clone)]
+struct NavPage {
+    title: String,
     filter_input: Entity<InputState>,
     table_state: Entity<TableState<NushellTableDelegate>>,
-    autosize: bool,
-    color_config: ColorConfig,
+}
+
+/// The main view. Holds a navigation stack of live page states.
+pub struct ToGuiView {
+    /// Navigation stack of page snapshots including table/input state.
+    nav_stack: Vec<NavPage>,
+    filter_input: Entity<InputState>,
+    table_state: Entity<TableState<NushellTableDelegate>>,
     save_dir: String,
     status_message: String,
     /// Copy of the root data used by the Save button.
@@ -601,12 +606,17 @@ impl ToGuiView {
             table_config.clone(),
             rfc3339,
         );
+
+        let root_page = NavPage {
+            title: "root".into(),
+            filter_input: fi.clone(),
+            table_state: ts.clone(),
+        };
+
         ToGuiView {
-            nav_stack: vec![(table_data, "root".into())],
+            nav_stack: vec![root_page],
             filter_input: fi,
             table_state: ts,
-            autosize,
-            color_config,
             save_dir,
             status_message: String::new(),
             root_data,
@@ -834,7 +844,6 @@ impl ToGuiView {
         autosize: bool,
         cc: &ColorConfig,
     ) {
-        self.nav_stack.push((data.clone(), title));
         let (fi, ts) = Self::build_page(
             window,
             cx,
@@ -846,29 +855,26 @@ impl ToGuiView {
             self.table_config.clone(),
             self.rfc3339,
         );
+
+        let page = NavPage {
+            title,
+            filter_input: fi.clone(),
+            table_state: ts.clone(),
+        };
+
+        self.nav_stack.push(page);
         self.filter_input = fi;
-        self.table_state  = ts;
+        self.table_state = ts;
         cx.notify();
     }
 
-    fn pop_page(&mut self, window: &mut Window, cx: &mut Context<ToGuiView>) {
+    fn pop_page(&mut self, _window: &mut Window, cx: &mut Context<ToGuiView>) {
         if self.nav_stack.len() > 1 {
             self.nav_stack.pop();
-            let (data, _) = self.nav_stack.last().unwrap().clone();
-            let cc = self.color_config.clone();
-            let (fi, ts) = Self::build_page(
-                window,
-                cx,
-                &data,
-                None,
-                self.autosize,
-                &cc,
-                self.closure_sources.clone(),
-                self.table_config.clone(),
-                self.rfc3339,
-            );
-            self.filter_input = fi;
-            self.table_state  = ts;
+            if let Some(page) = self.nav_stack.last().cloned() {
+                self.filter_input = page.filter_input;
+                self.table_state = page.table_state;
+            }
             cx.notify();
         }
     }
@@ -876,7 +882,10 @@ impl ToGuiView {
     fn can_go_back(&self) -> bool { self.nav_stack.len() > 1 }
 
     fn current_title(&self) -> String {
-        self.nav_stack.last().map(|(_, t)| t.clone()).unwrap_or_default()
+        self.nav_stack
+            .last()
+            .map(|page| page.title.clone())
+            .unwrap_or_default()
     }
 }
 
