@@ -9,7 +9,7 @@ use nu_plugin_to_gui::{ToGuiCommand, ToGuiPlugin};
 #[test]
 fn command_name_is_to_gui() {
     let command = ToGuiCommand;
-    assert_eq!(command.name(), "to-gui");
+    assert_eq!(command.name(), "to gui");
 }
 
 #[test]
@@ -34,5 +34,5 @@ fn plugin_exposes_one_command() {
     use nu_plugin::Plugin;
     let plugin = ToGuiPlugin;
     assert_eq!(plugin.commands().len(), 1);
-    assert_eq!(plugin.commands()[0].name(), "to-gui");
+    assert_eq!(plugin.commands()[0].name(), "to gui");
 }

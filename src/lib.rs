@@ -1,6 +1,6 @@
 #![recursion_limit = "256"]
 
-//! Core library for the `to-gui` nushell plugin.
+//! Core library for the `to gui` nushell plugin.
 //! Contains the plugin command, color/config helpers, GUI entrypoints, and
 //! conversion utilities used by `src/main.rs`.
 

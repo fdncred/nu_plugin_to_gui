@@ -6,7 +6,7 @@ The intent is to show the output of Nushell commands in a GUI.
 
 ## User Features
 
-- Open Nushell pipeline output in a desktop table UI with `to-gui`.
+- Open Nushell pipeline output in a desktop table UI with `to gui`.
 - Works with table, record, and mixed structured data.
 - Auto-generates columns/rows from incoming data shape.
 - Auto-transposes a single record into key/value rows for readability.
@@ -27,14 +27,14 @@ The intent is to show the output of Nushell commands in a GUI.
 - Right-click any cell and copy that specific value.
 - Access top-level app menus (File, Edit, View, Options, Window, Help).
 - Save table output to JSON from the GUI.
-- Open data quickly from common Nushell workflows like `ls | to-gui` and `$env.config | to-gui`.
+- Open data quickly from common Nushell workflows like `ls | to gui` and `$env.config | to gui`.
 - Start with a window size that adapts to table dimensions.
 
 ## Project Layout
 
 - `src/main.rs`: plugin binary entrypoint (serves the Nushell plugin).
 - `src/lib.rs`: crate root that wires modules and public exports.
-- `src/plugin_command.rs`: `to-gui` command definition and Nushell plugin integration.
+- `src/plugin_command.rs`: `to gui` command definition and Nushell plugin integration.
 - `src/color_config.rs`: user-facing color behavior (`color_config`, `LS_COLORS`, style resolution).
 - `src/color_utils.rs`: shared color/style helper utilities.
 - `src/table_data.rs`: shared table model passed between conversion and GUI layers.
@@ -52,7 +52,7 @@ The intent is to show the output of Nushell commands in a GUI.
 
 ```mermaid
 flowchart TD
-	A["Nushell pipeline input<br/>example command: ls | to-gui"] --> B[src/main.rs<br/>serve plugin]
+	A["Nushell pipeline input<br/>example command: ls | to gui"] --> B[src/main.rs<br/>serve plugin]
 	B --> C[src/plugin_command.rs<br/>ToGuiCommand::run]
 
 	C --> D[src/value_conv/table.rs<br/>values_to_table_*]
@@ -85,7 +85,7 @@ flowchart TD
 2. Run `cargo build` to compile the project or `cargo install --path .`. Dependencies are fetched from the Nushell GitHub repo.
 3. Register the plugin with `plugin add /path/to/nu_plugin_to_gui`.
 4. Restart or use the plugin with `plugin use /path/to/nu_plugin_to_gui`
-5. Try it out `ls | to-gui`
+5. Try it out `ls | to gui`
 
 _Note:_ the project is in early development and primarily intended for internal tooling or experimentation.
 

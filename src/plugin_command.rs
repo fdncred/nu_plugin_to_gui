@@ -22,7 +22,7 @@ impl PluginCommand for ToGuiCommand {
     type Plugin = ToGuiPlugin;
 
     fn name(&self) -> &str {
-        "to-gui"
+        "to gui"
     }
 
     fn description(&self) -> &str {
@@ -30,7 +30,7 @@ impl PluginCommand for ToGuiCommand {
     }
 
     fn signature(&self) -> Signature {
-        Signature::build("to-gui")
+        Signature::build("to gui")
             .input_output_types(vec![(nu_protocol::Type::Any, nu_protocol::Type::Any)])
             .switch("no-transpose", "do not auto-transpose a single record into key/value rows", None)
             .switch("no-autosize", "disable automatic column sizing (enabled by default)", None)
@@ -90,7 +90,7 @@ impl PluginCommand for ToGuiCommand {
             rfc3339,
         ) {
             return Err(LabeledError::new(format!(
-                "to-gui: failed to launch GUI: {err:#}"
+                "to gui: failed to launch GUI: {err:#}"
             )));
         }
 

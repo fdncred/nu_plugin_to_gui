@@ -1,11 +1,9 @@
 //! GUI code using `gpui` and `gpui-component` to render table data.
 //!
 //! # Navigation model
-//! The view holds a stack of `TableData` snapshots.  When the user
-//! double-clicks a cell that contains a record or list, the nested data is
-//! pushed onto the stack and the table re-renders with that data.  A "Back"
-//! button in the custom in-window toolbar lets the user return to the previous
-//! table.
+//! The view holds a stack of live page states. When the user double-clicks a
+//! cell containing a record or list, a nested page is pushed. Pressing Back
+//! restores the previous page state (including table position/selection).
 
 use crate::TableData;
 use crate::color_utils::{style_cache_key, value_type_key};
@@ -563,7 +561,7 @@ struct NavPage {
 
 /// The main view. Holds a navigation stack of live page states.
 pub struct ToGuiView {
-    /// Navigation stack of page snapshots including table/input state.
+    /// Navigation stack of live page states including table/input state.
     nav_stack: Vec<NavPage>,
     filter_input: Entity<InputState>,
     table_state: Entity<TableState<NushellTableDelegate>>,
