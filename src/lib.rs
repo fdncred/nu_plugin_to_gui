@@ -11,7 +11,10 @@
 // and expose a minimal stub for the types the rest of lib.rs depends on.
 #[cfg(not(test))]
 pub mod gui;
+pub mod color_utils;
+pub mod table_data;
 pub mod value_conv;
+pub use table_data::TableData;
 
 #[cfg(not(test))]
 use gui::{CellStyle, ColorConfig};
@@ -39,6 +42,7 @@ pub struct ColorConfig {
 use nu_plugin::{Plugin, PluginCommand, EvaluatedCall, EngineInterface};
 use nu_protocol::{Record, Value, LabeledError, PipelineData, Signature, SyntaxShape, Spanned};
 use gpui::Rgba;
+use crate::color_utils::{style_cache_key, value_type_key, xterm_256_to_rgb};
 use std::collections::HashMap;
 use nu_ansi_term::Color as AnsiColor;
 use lscolors::{Indicator as LsIndicator, LsColors};
@@ -76,32 +80,6 @@ fn parse_ansi_color_code(code: &str) -> Option<Rgba> {
         "97" => Some(gpui::rgb(0xffffff)),
         _ => None,
     }
-}
-
-fn xterm_256_to_rgb(code: u8) -> Rgba {
-    if code < 16 {
-        let base = [
-            0x000000, 0x800000, 0x008000, 0x808000, 0x000080, 0x800080, 0x008080, 0xc0c0c0,
-            0x808080, 0xff0000, 0x00ff00, 0xffff00, 0x0000ff, 0xff00ff, 0x00ffff, 0xffffff,
-        ];
-        return gpui::rgb(base[code as usize]);
-    }
-
-    if (16..=231).contains(&code) {
-        let idx = code - 16;
-        let r = idx / 36;
-        let g = (idx % 36) / 6;
-        let b = idx % 6;
-        let level = |v: u8| if v == 0 { 0 } else { 55 + 40 * v };
-        let rr = level(r) as u32;
-        let gg = level(g) as u32;
-        let bb = level(b) as u32;
-        return gpui::rgb((rr << 16) | (gg << 8) | bb);
-    }
-
-    let gray = 8 + (code - 232) * 10;
-    let g = gray as u32;
-    gpui::rgb((g << 16) | (g << 8) | g)
 }
 
 fn parse_ls_color_value(spec: &str) -> Option<Rgba> {
@@ -322,31 +300,11 @@ fn is_ls_like_table(table: &TableData) -> bool {
     has("name") && has("type") && has("size") && has("modified")
 }
 
-fn value_type_key_for_color(v: &Value) -> &'static str {
-    match v {
-        Value::Bool { .. } => "bool",
-        Value::Int { .. } => "int",
-        Value::Float { .. } => "float",
-        Value::String { .. } => "string",
-        Value::Filesize { .. } => "filesize",
-        Value::Duration { .. } => "duration",
-        Value::Date { .. } => "date",
-        Value::Range { .. } => "range",
-        Value::Record { .. } => "record",
-        Value::List { .. } => "list",
-        Value::Closure { .. } => "closure",
-        Value::Nothing { .. } => "nothing",
-        Value::Binary { .. } => "binary",
-        Value::CellPath { .. } => "cellpath",
-        _ => "string",
-    }
-}
-
 fn find_sample_value_for_style_key(values: &[Value], style_key: &str) -> Option<Value> {
     let target = if style_key == "datetime" { "date" } else { style_key };
 
     fn walk(v: &Value, target: &str) -> Option<Value> {
-        if value_type_key_for_color(v) == target {
+        if value_type_key(v) == target {
             return Some(v.clone());
         }
 
@@ -392,7 +350,7 @@ fn collect_values_for_style_key(values: &[Value], style_key: &str) -> Vec<Value>
     let mut out = Vec::new();
 
     fn walk(v: &Value, target: &str, out: &mut Vec<Value>) {
-        if value_type_key_for_color(v) == target {
+        if value_type_key(v) == target {
             out.push(v.clone());
         }
 
@@ -520,10 +478,6 @@ fn default_ls_colors_from_nushell(values: &[Value]) -> HashMap<String, Rgba> {
     }
 
     out
-}
-
-fn style_cache_key(v: &Value) -> String {
-    serde_json::to_string(v).unwrap_or_else(|_| format!("{:?}", v.get_type()))
 }
 
 fn style_from_color_value(value: &Value) -> Option<CellStyle> {
@@ -780,29 +734,12 @@ impl PluginCommand for ToGuiCommand {
             (*nu_config).clone(),
             rfc3339,
         ) {
-            eprintln!("to-gui: GUI error: {:#?}", err);
+            return Err(LabeledError::new(format!(
+                "to-gui: failed to launch GUI: {err:#}"
+            )));
         }
 
         Ok(PipelineData::empty())
-    }
-}
-
-/// A simple representation of tabular data used by the GUI layer.
-///
-/// Columns are stored as a list of keys; each row is a vector of strings
-/// with the same length as `columns`.  Empty strings indicate missing
-/// values.
-#[derive(Debug, Clone, PartialEq, serde::Serialize)]
-pub struct TableData {
-    pub columns: Vec<String>,
-    pub rows: Vec<Vec<String>>,
-    /// original cell values corresponding to `rows` (same shape)
-    pub raw: Vec<Vec<Value>>,
-}
-
-impl TableData {
-    pub fn new(columns: Vec<String>, rows: Vec<Vec<String>>, raw: Vec<Vec<Value>>) -> Self {
-        TableData { columns, rows, raw }
     }
 }
 
