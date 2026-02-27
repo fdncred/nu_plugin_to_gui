@@ -4270,6 +4270,7 @@ dependencies = [
  "nu-plugin",
  "nu-protocol",
  "nu-utils",
+ "pkg-config",
  "serde",
  "serde_json",
 ]

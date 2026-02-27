@@ -12,15 +12,16 @@ use crate::window_sizing::ideal_window_size;
 use nu_protocol::{Config, Value};
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
-use gpui_component::{Root, StyledExt};
+use gpui_component::{Root, StyledExt, Theme, ThemeMode};
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::table::{Table, TableDelegate, TableState, TableEvent, Column, ColumnSort};
 use gpui_component::input::{Input, InputState, InputEvent};
 use gpui_component::menu::{DropdownMenu as _, PopupMenu, PopupMenuItem};
 use std::collections::HashMap;
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::any::Any;
 
 // json value type alias to avoid collision with `nu_protocol::Value`.
 use serde_json::Value as JsonValue;
@@ -1085,7 +1086,7 @@ impl Render for ToGuiView {
             .py_1()
             .w_full()
             .border_t_1()
-            .border_color(rgb(0xdddddd))
+            .border_color(rgb(0x1f2937))
             .child(
                 gpui::div()
                     .flex_shrink_0()
@@ -1101,7 +1102,7 @@ impl Render for ToGuiView {
             .child(
                 gpui::div()
                     .flex_1()
-                    .text_color(rgb(0x555555))
+                    .text_color(rgb(0xe5e7eb))
                     .child(self.status_message.clone()),
             );
 
@@ -1124,6 +1125,65 @@ impl Render for ToGuiView {
 // Entry point
 // ---------------------------------------------------------------------------
 
+#[cfg(not(test))]
+fn panic_payload_to_string(payload: Box<dyn Any + Send>) -> String {
+    if let Some(msg) = payload.downcast_ref::<String>() {
+        return msg.clone();
+    }
+    if let Some(msg) = payload.downcast_ref::<&'static str>() {
+        return (*msg).to_string();
+    }
+    "unknown panic payload".to_string()
+}
+
+#[cfg(not(test))]
+fn build_app() -> Result<Application> {
+    let make_app = || Application::new().with_assets(gpui_component_assets::Assets);
+
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    {
+        let wayland = std::env::var_os("WAYLAND_DISPLAY").is_some_and(|v| !v.is_empty());
+        let x11 = std::env::var_os("DISPLAY").is_some_and(|v| !v.is_empty());
+        let force_wayland = std::env::var("TO_GUI_FORCE_WAYLAND")
+            .map(|v| {
+                let low = v.to_ascii_lowercase();
+                matches!(low.as_str(), "1" | "true" | "yes" | "on")
+            })
+            .unwrap_or(false);
+
+        if wayland && x11 && !force_wayland {
+            match std::panic::catch_unwind(make_app) {
+                Ok(app) => return Ok(app),
+                Err(first_panic) => {
+                    let first_error = panic_payload_to_string(first_panic);
+                    unsafe {
+                        std::env::remove_var("WAYLAND_DISPLAY");
+                        std::env::remove_var("WAYLAND_SOCKET");
+                    }
+
+                    eprintln!(
+                        "to-gui: Wayland initialization failed ({first_error}); retrying with X11 backend"
+                    );
+
+                    return std::panic::catch_unwind(make_app).map_err(|second_panic| {
+                        anyhow!(
+                            "to gui: failed to initialize GUI backends. Wayland error: {first_error}. X11 retry error: {}",
+                            panic_payload_to_string(second_panic)
+                        )
+                    });
+                }
+            }
+        }
+    }
+
+    std::panic::catch_unwind(make_app).map_err(|panic_payload| {
+        anyhow!(
+            "to gui: GUI initialization panicked: {}",
+            panic_payload_to_string(panic_payload)
+        )
+    })
+}
+
 /// Launch the GUI.
 #[cfg(not(test))]
 pub fn run_table_gui(
@@ -1136,13 +1196,14 @@ pub fn run_table_gui(
     table_config: Config,
     rfc3339: bool,
 ) -> Result<()> {
-    let app = Application::new().with_assets(gpui_component_assets::Assets);
+    let app = build_app()?;
 
     // Pre-compute the ideal size outside app.run so we can borrow `table`.
     let size = ideal_window_size(&table, autosize);
 
     app.run(move |cx| {
         gpui_component::init(cx);
+        Theme::change(ThemeMode::Dark, None, cx);
         cx.activate(true);
 
         // On macOS the system menu bar picks this up.

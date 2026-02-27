@@ -2,6 +2,7 @@
 name = "nu_plugin_to_gui"
 version = "0.1.0"
 edition = "2024"
+build = "build.rs"
 
 [dependencies]
 # Use local nushell workspace at 0.110.1 to avoid ListenerNonblockingMode error.
@@ -23,6 +24,9 @@ serde_json = "1.0"
 
 [dev-dependencies]
 chrono = { version = "0.4", default-features = false, features = ["std"] }
+
+[target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.build-dependencies]
+pkg-config = "0.3"
 
 
 
