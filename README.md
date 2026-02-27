@@ -52,7 +52,7 @@ The intent is to show the output of Nushell commands in a GUI.
 
 ```mermaid
 flowchart TD
-	A[Nushell pipeline input<br/>example command: ls \| to-gui] --> B[src/main.rs<br/>serve plugin]
+	A[Nushell pipeline input<br/>example command: ls to-gui] --> B[src/main.rs<br/>serve plugin]
 	B --> C[src/plugin_command.rs<br/>ToGuiCommand::run]
 
 	C --> D[src/value_conv/table.rs<br/>values_to_table_*]
