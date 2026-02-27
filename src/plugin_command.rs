@@ -32,8 +32,16 @@ impl PluginCommand for ToGuiCommand {
     fn signature(&self) -> Signature {
         Signature::build("to gui")
             .input_output_types(vec![(nu_protocol::Type::Any, nu_protocol::Type::Any)])
-            .switch("no-transpose", "do not auto-transpose a single record into key/value rows", None)
-            .switch("no-autosize", "disable automatic column sizing (enabled by default)", None)
+            .switch(
+                "no-transpose",
+                "do not auto-transpose a single record into key/value rows",
+                None,
+            )
+            .switch(
+                "no-autosize",
+                "disable automatic column sizing (enabled by default)",
+                None,
+            )
             .switch("rfc3339", "format all datetime values in RFC3339", None)
             .named("filter", SyntaxShape::String, "initial filter string", None)
     }
@@ -54,7 +62,9 @@ impl PluginCommand for ToGuiCommand {
         let autosize = !no_autosize;
         let values: Vec<Value> = input.into_iter().collect();
 
-        let table = crate::value_conv::values_to_table_with_plugin_engine(&values, transpose, engine, rfc3339);
+        let table = crate::value_conv::values_to_table_with_plugin_engine(
+            &values, transpose, engine, rfc3339,
+        );
         let color_config = build_runtime_color_config(&table, &values, engine);
 
         let save_dir = engine.get_current_dir().unwrap_or_else(|_| {
@@ -63,9 +73,22 @@ impl PluginCommand for ToGuiCommand {
                 .unwrap_or_else(|_| ".".to_string())
         });
 
-        let closure_sources = crate::value_conv::collect_closure_sources_with_plugin_engine(&values, engine);
+        let closure_sources =
+            crate::value_conv::collect_closure_sources_with_plugin_engine(&values, engine);
         #[cfg(not(test))]
         let nu_config = engine.get_config().unwrap_or_default();
+
+        #[cfg(not(test))]
+        let launch = crate::gui_dispatch::GuiLaunch {
+            table,
+            initial_filter,
+            autosize,
+            color_config,
+            save_dir,
+            closure_sources,
+            table_config: (*nu_config).clone(),
+            rfc3339,
+        };
 
         #[cfg(test)]
         let _ = (
@@ -80,27 +103,9 @@ impl PluginCommand for ToGuiCommand {
 
         #[cfg(not(test))]
         let gui_result = if crate::gui_dispatch::has_main_thread_dispatch() {
-            crate::gui_dispatch::run_table_gui_on_main_thread(
-                table,
-                initial_filter,
-                autosize,
-                color_config,
-                save_dir,
-                closure_sources,
-                (*nu_config).clone(),
-                rfc3339,
-            )
+            crate::gui_dispatch::run_table_gui_on_main_thread(launch)
         } else {
-            crate::gui::run_table_gui(
-                table,
-                initial_filter,
-                autosize,
-                color_config,
-                save_dir,
-                closure_sources,
-                (*nu_config).clone(),
-                rfc3339,
-            )
+            crate::gui::run_table_gui(launch)
         };
 
         #[cfg(not(test))]

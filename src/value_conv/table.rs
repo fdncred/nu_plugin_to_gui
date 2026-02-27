@@ -21,7 +21,7 @@ pub fn values_to_table_with_plugin_engine(
         transpose,
         Some(engine),
         None,
-        cfg.as_ref().map(|v| &**v),
+        cfg.as_deref(),
         rfc3339,
     )
 }
@@ -59,20 +59,22 @@ fn values_to_table_with_engine(
     config: Option<&Config>,
     rfc3339: bool,
 ) -> TableData {
-    if transpose {
-        if values.len() == 1 {
-            if let Value::Record { val: rec, .. } = &values[0] {
-                let rec = rec.as_ref();
-                let cols = vec!["key".to_string(), "value".to_string()];
-                let mut rows = Vec::new();
-                let mut raw_rows = Vec::new();
-                for (k, v) in rec.iter() {
-                    rows.push(vec![k.clone(), value_to_string_with_engine(v, engine, closure_sources, config, rfc3339)]);
-                    raw_rows.push(vec![Value::string(k.clone(), Span::unknown()), v.clone()]);
-                }
-                return TableData::new(cols, rows, raw_rows);
-            }
+    if transpose
+        && values.len() == 1
+        && let Value::Record { val: rec, .. } = &values[0]
+    {
+        let rec = rec.as_ref();
+        let cols = vec!["key".to_string(), "value".to_string()];
+        let mut rows = Vec::new();
+        let mut raw_rows = Vec::new();
+        for (k, v) in rec.iter() {
+            rows.push(vec![
+                k.clone(),
+                value_to_string_with_engine(v, engine, closure_sources, config, rfc3339),
+            ]);
+            raw_rows.push(vec![Value::string(k.clone(), Span::unknown()), v.clone()]);
         }
+        return TableData::new(cols, rows, raw_rows);
     }
 
     let mut cols_vec: Vec<String> = Vec::new();
@@ -106,13 +108,10 @@ fn values_to_table_with_engine(
     let mut rows: Vec<Vec<String>> = Vec::new();
     let mut raw_rows: Vec<Vec<Value>> = Vec::new();
 
-    for v in values
-        .iter()
-        .flat_map(|val| match val {
-            Value::List { vals, .. } => vals.clone(),
-            _ => vec![val.clone()],
-        })
-    {
+    for v in values.iter().flat_map(|val| match val {
+        Value::List { vals, .. } => vals.clone(),
+        _ => vec![val.clone()],
+    }) {
         match &v {
             Value::Record { val: rec, .. } => {
                 let rec = rec.as_ref();
@@ -120,7 +119,13 @@ fn values_to_table_with_engine(
                 let mut raw_row = Vec::with_capacity(cols_vec.len());
                 for key in &cols_vec {
                     if let Some(val) = rec.get(key.as_str()) {
-                        row.push(value_to_string_with_engine(val, engine, closure_sources, config, rfc3339));
+                        row.push(value_to_string_with_engine(
+                            val,
+                            engine,
+                            closure_sources,
+                            config,
+                            rfc3339,
+                        ));
                         raw_row.push(val.clone());
                     } else {
                         row.push(String::new());
@@ -131,7 +136,13 @@ fn values_to_table_with_engine(
                 raw_rows.push(raw_row);
             }
             other => {
-                rows.push(vec![value_to_string_with_engine(other, engine, closure_sources, config, rfc3339)]);
+                rows.push(vec![value_to_string_with_engine(
+                    other,
+                    engine,
+                    closure_sources,
+                    config,
+                    rfc3339,
+                )]);
                 raw_rows.push(vec![other.clone()]);
             }
         }

@@ -51,10 +51,10 @@ fn parse_ls_color_value(spec: &str) -> Option<Rgba> {
         }
 
         if *part == "38" {
-            if parts.get(i + 1) == Some(&"5") {
-                if let Some(code) = parts.get(i + 2).and_then(|n| n.parse::<u8>().ok()) {
-                    return Some(xterm_256_to_rgb(code));
-                }
+            if parts.get(i + 1) == Some(&"5")
+                && let Some(code) = parts.get(i + 2).and_then(|n| n.parse::<u8>().ok())
+            {
+                return Some(xterm_256_to_rgb(code));
             }
             if parts.get(i + 1) == Some(&"2") {
                 let r = parts.get(i + 2).and_then(|n| n.parse::<u8>().ok());
@@ -94,10 +94,10 @@ fn parse_ls_colors(ls_colors: &str) -> HashMap<String, Rgba> {
 fn parse_ls_colors_record(record: &Record) -> HashMap<String, Rgba> {
     let mut out = HashMap::new();
     for (key, value) in record.iter() {
-        if let Value::String { val, .. } = value {
-            if let Some(color) = parse_ls_color_value(val) {
-                out.insert(key.clone(), color);
-            }
+        if let Value::String { val, .. } = value
+            && let Some(color) = parse_ls_color_value(val)
+        {
+            out.insert(key.clone(), color);
         }
     }
     out
@@ -153,10 +153,11 @@ pub fn parse_color(s: &str) -> Option<Rgba> {
 fn parse_color_name(s: &str) -> Option<Rgba> {
     let s = s.trim().trim_start_matches('#');
 
-    if s.len() == 6 && s.chars().all(|c| c.is_ascii_hexdigit()) {
-        if let Ok(v) = u32::from_str_radix(s, 16) {
-            return Some(gpui::rgb(v));
-        }
+    if s.len() == 6
+        && s.chars().all(|c| c.is_ascii_hexdigit())
+        && let Ok(v) = u32::from_str_radix(s, 16)
+    {
+        return Some(gpui::rgb(v));
     }
 
     match s.to_lowercase().as_str() {
@@ -234,7 +235,11 @@ fn is_ls_like_table(table: &TableData) -> bool {
 }
 
 fn find_sample_value_for_style_key(values: &[Value], style_key: &str) -> Option<Value> {
-    let target = if style_key == "datetime" { "date" } else { style_key };
+    let target = if style_key == "datetime" {
+        "date"
+    } else {
+        style_key
+    };
 
     fn walk(v: &Value, target: &str) -> Option<Value> {
         if value_type_key(v) == target {
@@ -279,7 +284,11 @@ fn find_sample_value_for_style_key(values: &[Value], style_key: &str) -> Option<
 }
 
 fn collect_values_for_style_key(values: &[Value], style_key: &str) -> Vec<Value> {
-    let target = if style_key == "datetime" { "date" } else { style_key };
+    let target = if style_key == "datetime" {
+        "date"
+    } else {
+        style_key
+    };
     let mut out = Vec::new();
 
     fn walk(v: &Value, target: &str, out: &mut Vec<Value>) {
@@ -346,10 +355,10 @@ fn collect_name_strings(v: &Value, out: &mut Vec<String>) {
     match v {
         Value::Record { val, .. } => {
             for (k, inner) in val.as_ref().iter() {
-                if k.eq_ignore_ascii_case("name") {
-                    if let Value::String { val, .. } = inner {
-                        out.push(val.clone());
-                    }
+                if k.eq_ignore_ascii_case("name")
+                    && let Value::String { val, .. } = inner
+                {
+                    out.push(val.clone());
                 }
                 collect_name_strings(inner, out);
             }
@@ -385,10 +394,10 @@ fn default_ls_colors_from_nushell(values: &[Value]) -> HashMap<String, Rgba> {
     ];
 
     for (key, ind) in indicators {
-        if let Some(style) = ls.style_for_indicator(ind) {
-            if let Some(fg) = style.foreground {
-                out.insert(key.to_string(), lscolors_color_to_rgba(fg));
-            }
+        if let Some(style) = ls.style_for_indicator(ind)
+            && let Some(fg) = style.foreground
+        {
+            out.insert(key.to_string(), lscolors_color_to_rgba(fg));
         }
     }
 
@@ -398,14 +407,14 @@ fn default_ls_colors_from_nushell(values: &[Value]) -> HashMap<String, Rgba> {
     }
 
     for name in names {
-        if let Some(dot) = name.rfind('.') {
-            if dot + 1 < name.len() {
-                let ext = name[dot + 1..].to_ascii_lowercase();
-                if let Some(style) = ls.style_for_str(&name) {
-                    if let Some(fg) = style.foreground {
-                        out.insert(format!("*.{}", ext), lscolors_color_to_rgba(fg));
-                    }
-                }
+        if let Some(dot) = name.rfind('.')
+            && dot + 1 < name.len()
+        {
+            let ext = name[dot + 1..].to_ascii_lowercase();
+            if let Some(style) = ls.style_for_str(&name)
+                && let Some(fg) = style.foreground
+            {
+                out.insert(format!("*.{}", ext), lscolors_color_to_rgba(fg));
             }
         }
     }
@@ -433,11 +442,16 @@ fn apply_closure_color_overrides(
 ) {
     let debug = colors_debug_enabled();
     for (key, entry) in map {
-        let Value::Closure { val, .. } = entry else { continue };
+        let Value::Closure { val, .. } = entry else {
+            continue;
+        };
 
         let Some(sample) = find_sample_value_for_style_key(values, key) else {
             if debug {
-                eprintln!("to-gui[color]: closure key '{}' had no sample value in pipeline", key);
+                eprintln!(
+                    "to-gui[color]: closure key '{}' had no sample value in pipeline",
+                    key
+                );
             }
             continue;
         };
@@ -475,14 +489,12 @@ fn apply_closure_color_overrides(
             color_config.type_styles.insert(key.clone(), style);
         }
 
-        if debug {
-            if let Some(applied) = color_config.type_styles.get(key) {
-                eprintln!(
-                    "to-gui[color]: closure key '{}' resolved base style {}",
-                    key,
-                    debug_cell_style(applied)
-                );
-            }
+        if debug && let Some(applied) = color_config.type_styles.get(key) {
+            eprintln!(
+                "to-gui[color]: closure key '{}' resolved base style {}",
+                key,
+                debug_cell_style(applied)
+            );
         }
 
         let samples = collect_values_for_style_key(values, key);
@@ -514,8 +526,7 @@ fn apply_closure_color_overrides(
                 .unwrap_or(0);
             eprintln!(
                 "to-gui[color]: closure key '{}' cached {} per-value styles",
-                key,
-                per_value_count
+                key, per_value_count
             );
         }
     }
@@ -560,8 +571,7 @@ pub fn build_runtime_color_config(
 
     if debug {
         let keys = [
-            "string", "int", "float", "filesize", "date", "datetime", "duration", "bool",
-            "header",
+            "string", "int", "float", "filesize", "date", "datetime", "duration", "bool", "header",
         ];
         for key in keys {
             if key == "header" {
@@ -572,7 +582,11 @@ pub fn build_runtime_color_config(
                 continue;
             }
             if let Some(style) = color_config.type_styles.get(key) {
-                eprintln!("to-gui[color]: type '{}' => {}", key, debug_cell_style(style));
+                eprintln!(
+                    "to-gui[color]: type '{}' => {}",
+                    key,
+                    debug_cell_style(style)
+                );
             } else {
                 eprintln!("to-gui[color]: type '{}' => <missing>", key);
             }
@@ -627,7 +641,7 @@ mod tests {
     #[test]
     fn parse_ls_colors_xterm_256_and_truecolor() {
         let map = parse_ls_colors("*.nu=38;5;196:*.md=38;2;1;2;3");
-        assert!(map.get("*.nu").is_some());
+        assert!(map.contains_key("*.nu"));
         assert_eq!(map.get("*.md"), Some(&gpui::rgb(0x010203)));
     }
 }

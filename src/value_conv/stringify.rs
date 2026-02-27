@@ -1,5 +1,5 @@
 use nu_plugin::EngineInterface;
-use nu_protocol::{ast::PathMember, Config, Value};
+use nu_protocol::{Config, Value, ast::PathMember};
 use std::collections::HashMap;
 
 use super::closure::closure_to_display_string;
@@ -22,7 +22,9 @@ fn value_to_json_value_serialize(
         Value::Filesize { val, .. } => Some(serde_json::Value::Number(val.get().into())),
         Value::Duration { val, .. } => Some(serde_json::Value::Number((*val).into())),
         Value::Date { val, .. } => Some(serde_json::Value::String(val.to_string())),
-        Value::Float { val, .. } => serde_json::Number::from_f64(*val).map(serde_json::Value::Number),
+        Value::Float { val, .. } => {
+            serde_json::Number::from_f64(*val).map(serde_json::Value::Number)
+        }
         Value::Int { val, .. } => Some(serde_json::Value::Number((*val).into())),
         Value::Nothing { .. } => Some(serde_json::Value::Null),
         Value::String { val, .. } => Some(serde_json::Value::String(val.clone())),
@@ -48,12 +50,11 @@ fn value_to_json_value_serialize(
             let mut source = engine
                 .and_then(|engine| closure_to_display_string(engine, v))
                 .unwrap_or_default();
-            if source.is_empty() {
-                if let Some(cache) = closure_sources {
-                    if let Some(cached) = cache.get(&val.block_id.get()) {
-                        source = cached.clone();
-                    }
-                }
+            if source.is_empty()
+                && let Some(cache) = closure_sources
+                && let Some(cached) = cache.get(&val.block_id.get())
+            {
+                source = cached.clone();
             }
             if source.is_empty() {
                 source = format!("closure_{}", val.block_id.get());
@@ -94,10 +95,8 @@ pub(super) fn value_to_string_with_engine(
 ) -> String {
     match v {
         Value::Date { .. } => {
-            if rfc3339 {
-                if let Value::Date { val, .. } = v {
-                    return val.to_rfc3339();
-                }
+            if rfc3339 && let Value::Date { val, .. } = v {
+                return val.to_rfc3339();
             }
             if let Some(cfg) = config {
                 v.to_abbreviated_string(cfg)
@@ -138,23 +137,23 @@ pub(super) fn value_to_string_with_engine(
             format!("[{}]", elems.join(", "))
         }
         Value::Closure { val, .. } => {
-            if let Some(engine) = engine {
-                if let Some(source) = closure_to_display_string(engine, v) {
-                    return source;
-                }
+            if let Some(engine) = engine
+                && let Some(source) = closure_to_display_string(engine, v)
+            {
+                return source;
             }
-            if let Some(cache) = closure_sources {
-                if let Some(cached) = cache.get(&val.block_id.get()) {
-                    return cached.clone();
-                }
+            if let Some(cache) = closure_sources
+                && let Some(cached) = cache.get(&val.block_id.get())
+            {
+                return cached.clone();
             }
             format!("closure_{}", val.block_id.get())
         }
         _ => {
-            if let Some(json_value) = value_to_json_value_serialize(v, engine, closure_sources) {
-                if let Ok(json) = serde_json::to_string(&json_value) {
-                    return json;
-                }
+            if let Some(json_value) = value_to_json_value_serialize(v, engine, closure_sources)
+                && let Ok(json) = serde_json::to_string(&json_value)
+            {
+                return json;
             }
             if let Ok(json) = serde_json::to_string(v) {
                 json
@@ -173,5 +172,5 @@ pub(crate) fn value_to_string(v: &Value) -> String {
 #[allow(dead_code)]
 pub(crate) fn value_to_string_with_plugin_engine(v: &Value, engine: &EngineInterface) -> String {
     let cfg = engine.get_config().ok();
-    value_to_string_with_engine(v, Some(engine), None, cfg.as_ref().map(|v| &**v), false)
+    value_to_string_with_engine(v, Some(engine), None, cfg.as_deref(), false)
 }

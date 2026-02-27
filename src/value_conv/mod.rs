@@ -7,17 +7,15 @@ mod table;
 
 pub use closure::collect_closure_sources_with_plugin_engine;
 pub use table::{
-    values_to_table,
-    values_to_table_with_closure_sources,
-    values_to_table_with_closure_sources_and_config,
-    values_to_table_with_plugin_engine,
+    values_to_table, values_to_table_with_closure_sources,
+    values_to_table_with_closure_sources_and_config, values_to_table_with_plugin_engine,
 };
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::stringify::value_to_string;
-    use nu_protocol::{engine::Closure, Record, Span, Value};
+    use super::*;
+    use nu_protocol::{Record, Span, Value, engine::Closure};
 
     fn make_record(pairs: &[(&str, Value)]) -> Value {
         let mut rec = Record::new();
@@ -29,7 +27,10 @@ mod tests {
 
     #[test]
     fn scalar_values_produce_value_column() {
-        let vals = vec![Value::int(1, Span::unknown()), Value::string("foo", Span::unknown())];
+        let vals = vec![
+            Value::int(1, Span::unknown()),
+            Value::string("foo", Span::unknown()),
+        ];
         let table = values_to_table(&vals, false);
         assert_eq!(table.columns, vec!["value".to_string()]);
         assert_eq!(table.rows.len(), 2);
@@ -52,15 +53,25 @@ mod tests {
 
     #[test]
     fn records_union_columns() {
-        let r1 = make_record(&[("a", Value::int(1, Span::unknown())),
-                               ("b", Value::string("x", Span::unknown()))]);
-        let r2 = make_record(&[("b", Value::string("y", Span::unknown())),
-                               ("c", Value::int(2, Span::unknown()))]);
+        let r1 = make_record(&[
+            ("a", Value::int(1, Span::unknown())),
+            ("b", Value::string("x", Span::unknown())),
+        ]);
+        let r2 = make_record(&[
+            ("b", Value::string("y", Span::unknown())),
+            ("c", Value::int(2, Span::unknown())),
+        ]);
         let table = values_to_table(&[r1, r2], false);
         assert_eq!(table.columns, vec!["a", "b", "c"]);
         assert_eq!(table.rows.len(), 2);
-        assert_eq!(table.rows[0], vec!["1".to_string(), "x".to_string(), "".to_string()]);
-        assert_eq!(table.rows[1], vec!["".to_string(), "y".to_string(), "2".to_string()]);
+        assert_eq!(
+            table.rows[0],
+            vec!["1".to_string(), "x".to_string(), "".to_string()]
+        );
+        assert_eq!(
+            table.rows[1],
+            vec!["".to_string(), "y".to_string(), "2".to_string()]
+        );
     }
 
     #[test]
@@ -94,7 +105,10 @@ mod tests {
     fn nested_structures_are_stringified() {
         let mut inner_rec = Record::new();
         inner_rec.push("x".to_string(), Value::int(5, Span::unknown()));
-        let cell_list = Value::list(vec![Value::record(inner_rec, Span::unknown())], Span::unknown());
+        let cell_list = Value::list(
+            vec![Value::record(inner_rec, Span::unknown())],
+            Span::unknown(),
+        );
         let mut row_rec = Record::new();
         row_rec.push("items".to_string(), cell_list);
         let table = values_to_table(&[Value::record(row_rec, Span::unknown())], false);

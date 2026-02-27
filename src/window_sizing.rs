@@ -1,5 +1,5 @@
 use crate::TableData;
-use gpui::{px, Pixels, Size};
+use gpui::{Pixels, Size, px};
 
 pub(crate) fn ideal_window_size(table: &TableData, autosize: bool) -> Size<Pixels> {
     const ROW_H: f32 = 36.0;
@@ -40,8 +40,9 @@ pub(crate) fn ideal_window_size(table: &TableData, autosize: bool) -> Size<Pixel
         .sum();
 
     let width = (total_col_w + MARGIN_W).clamp(MIN_W.max(MENUBAR_MIN_W), MAX_W);
-    let height = (MENU_H + TOOLBAR_H + FILTER_H + HEADER_H + (table.rows.len() as f32) * ROW_H + EXTRA)
-        .clamp(MIN_H, MAX_H);
+    let height =
+        (MENU_H + TOOLBAR_H + FILTER_H + HEADER_H + (table.rows.len() as f32) * ROW_H + EXTRA)
+            .clamp(MIN_H, MAX_H);
 
     Size {
         width: px(width),

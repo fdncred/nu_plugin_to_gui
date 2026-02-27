@@ -8,12 +8,13 @@ fn closure_to_source_string(engine: &EngineInterface, value: &Value) -> Option<S
     };
 
     let value_span = value.span();
-    if value_span != Span::unknown() && !value_span.is_empty() {
-        if let Ok(bytes) = engine.get_span_contents(value_span) {
-            let s = String::from_utf8_lossy(&bytes).to_string();
-            if !s.trim().is_empty() {
-                return Some(s);
-            }
+    if value_span != Span::unknown()
+        && !value_span.is_empty()
+        && let Ok(bytes) = engine.get_span_contents(value_span)
+    {
+        let s = String::from_utf8_lossy(&bytes).to_string();
+        if !s.trim().is_empty() {
+            return Some(s);
         }
     }
 
@@ -76,7 +77,11 @@ pub(super) fn closure_to_display_string(engine: &EngineInterface, value: &Value)
     highlight_with_nu(engine, &source, value.span()).or(Some(source))
 }
 
-fn collect_closure_sources(value: &Value, engine: &EngineInterface, out: &mut HashMap<usize, String>) {
+fn collect_closure_sources(
+    value: &Value,
+    engine: &EngineInterface,
+    out: &mut HashMap<usize, String>,
+) {
     match value {
         Value::Closure { val, .. } => {
             if let Some(source) = closure_to_display_string(engine, value) {

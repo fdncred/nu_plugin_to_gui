@@ -1,5 +1,5 @@
 use crate::color_utils::{ansi_16_fg, xterm_256_to_rgb};
-use gpui::{rgb, Rgba};
+use gpui::{Rgba, rgb};
 
 #[derive(Clone, Debug)]
 pub(crate) struct AnsiSegment {

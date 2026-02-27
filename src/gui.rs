@@ -8,6 +8,7 @@
 use crate::TableData;
 use crate::color_utils::{style_cache_key, value_type_key};
 use crate::gui_ansi::parse_ansi_segments;
+use crate::gui_dispatch::GuiLaunch;
 use crate::window_sizing::ideal_window_size;
 use anyhow::{Result, anyhow};
 use gpui::prelude::FluentBuilder as _;
@@ -243,21 +244,19 @@ impl NushellTableDelegate {
             .cloned()
             .filter(|&ix| {
                 let row = &self.all_rows[ix];
-                if let Some(ref pat) = global {
-                    if !row
+                if let Some(ref pat) = global
+                    && !row
                         .iter()
                         .any(|cell| cell.to_lowercase().contains(pat.as_str()))
-                    {
-                        return false;
-                    }
+                {
+                    return false;
                 }
                 for (col_ix, filt) in self.column_filters.iter().enumerate() {
-                    if let Some(pat) = filt {
-                        if let Some(cell) = row.get(col_ix) {
-                            if !matches(cell, pat) {
-                                return false;
-                            }
-                        }
+                    if let Some(pat) = filt
+                        && let Some(cell) = row.get(col_ix)
+                        && !matches(cell, pat)
+                    {
+                        return false;
                     }
                 }
                 true
@@ -397,20 +396,20 @@ impl NushellTableDelegate {
                 .map(|s| s.as_str())
                 .unwrap_or_default();
 
-            if let Some(dot) = name.rfind('.') {
-                if dot + 1 < name.len() {
-                    let ext = &name[dot + 1..];
-                    if let Some(c) = self.color_config.ls_colors.get(&format!("*.{}", ext)) {
-                        return Some(*c);
-                    }
+            if let Some(dot) = name.rfind('.')
+                && dot + 1 < name.len()
+            {
+                let ext = &name[dot + 1..];
+                if let Some(c) = self.color_config.ls_colors.get(&format!("*.{}", ext)) {
+                    return Some(*c);
                 }
             }
         }
 
-        if let Some(ls_key) = self.ls_key_for_row_type(real_row) {
-            if let Some(c) = self.color_config.ls_colors.get(ls_key) {
-                return Some(*c);
-            }
+        if let Some(ls_key) = self.ls_key_for_row_type(real_row)
+            && let Some(c) = self.color_config.ls_colors.get(ls_key)
+        {
+            return Some(*c);
         }
 
         self.color_config.ls_colors.get("fi").copied()
@@ -508,10 +507,10 @@ impl TableDelegate for NushellTableDelegate {
         } else {
             div = div.child(text);
         }
-        if let Some(c) = fg {
-            if !has_ansi_segments {
-                div = div.text_color(c);
-            }
+        if let Some(c) = fg
+            && !has_ansi_segments
+        {
+            div = div.text_color(c);
         }
         if let Some(c) = bg {
             div = div.bg(c);
@@ -599,41 +598,44 @@ pub struct ToGuiView {
     status_message: String,
     /// Copy of the root data used by the Save button.
     root_data: TableData,
-    /// Closure source strings keyed by Nushell block id, captured at plugin entry.
+    /// Shared page construction settings.
+    settings: Arc<ViewSettings>,
+}
+
+#[derive(Clone)]
+struct ViewSettings {
+    autosize: bool,
+    color_config: ColorConfig,
     closure_sources: Arc<HashMap<usize, String>>,
-    /// Nushell runtime config used for display formatting (dates/filesizes/etc).
     table_config: Arc<Config>,
-    /// Whether datetime values should be rendered as RFC3339.
     rfc3339: bool,
 }
 
 impl ToGuiView {
-    pub fn new(
-        window: &mut Window,
-        cx: &mut Context<ToGuiView>,
-        table_data: TableData,
-        initial_filter: Option<String>,
-        autosize: bool,
-        color_config: ColorConfig,
-        save_dir: String,
-        closure_sources: HashMap<usize, String>,
-        table_config: Config,
-        rfc3339: bool,
-    ) -> Self {
+    pub fn new(window: &mut Window, cx: &mut Context<ToGuiView>, launch: GuiLaunch) -> Self {
+        let GuiLaunch {
+            table: table_data,
+            initial_filter,
+            autosize,
+            color_config,
+            save_dir,
+            closure_sources,
+            table_config,
+            rfc3339,
+        } = launch;
+
         let root_data = table_data.clone();
         let closure_sources = Arc::new(closure_sources);
         let table_config = Arc::new(table_config);
-        let (fi, ts) = Self::build_page(
-            window,
-            cx,
-            &table_data,
-            initial_filter,
+        let settings = Arc::new(ViewSettings {
             autosize,
-            &color_config,
-            closure_sources.clone(),
-            table_config.clone(),
+            color_config,
+            closure_sources: closure_sources.clone(),
+            table_config: table_config.clone(),
             rfc3339,
-        );
+        });
+
+        let (fi, ts) = Self::build_page(window, cx, &table_data, initial_filter, &settings);
 
         let root_page = NavPage {
             title: "root".into(),
@@ -648,9 +650,7 @@ impl ToGuiView {
             save_dir,
             status_message: String::new(),
             root_data,
-            closure_sources,
-            table_config,
-            rfc3339,
+            settings,
         }
     }
 
@@ -671,7 +671,7 @@ impl ToGuiView {
             .collect();
 
         serde_json::to_string_pretty(&json_rows)
-            .map_err(|err| std::io::Error::new(std::io::ErrorKind::Other, err.to_string()))
+            .map_err(|err| std::io::Error::other(err.to_string()))
     }
 
     fn save_root_json_to(&self, path: &Path) -> std::io::Result<()> {
@@ -740,11 +740,7 @@ impl ToGuiView {
         cx: &mut Context<ToGuiView>,
         data: &TableData,
         initial_filter: Option<String>,
-        autosize: bool,
-        cc: &ColorConfig,
-        closure_sources: Arc<HashMap<usize, String>>,
-        table_config: Arc<Config>,
-        rfc3339: bool,
+        settings: &Arc<ViewSettings>,
     ) -> (Entity<InputState>, Entity<TableState<NushellTableDelegate>>) {
         // Per-column filter inputs — owned by the delegate, rendered inside headers.
         let col_inputs: Vec<Entity<InputState>> = (0..data.columns.len())
@@ -753,7 +749,12 @@ impl ToGuiView {
         // Keep a clone for subscriptions; the originals move into the delegate.
         let col_inputs_for_subs = col_inputs.clone();
 
-        let delegate = NushellTableDelegate::new(data.clone(), autosize, cc.clone(), col_inputs);
+        let delegate = NushellTableDelegate::new(
+            data.clone(),
+            settings.autosize,
+            settings.color_config.clone(),
+            col_inputs,
+        );
 
         let ts = cx.new(|cx| {
             TableState::new(delegate, window, cx)
@@ -807,10 +808,7 @@ impl ToGuiView {
 
         // Subscribe to DoubleClickedRow to navigate into nested values
         let data_clone = data.clone();
-        let autosize_c = autosize;
-        let cc_clone = cc.clone();
-        let closure_sources_c = closure_sources.clone();
-        let table_config_c = table_config.clone();
+        let settings_c = settings.clone();
         cx.subscribe_in(&ts, window, move |view, _state, event, window, cx| {
             if let TableEvent::DoubleClickedRow(row_ix) = event {
                 let row_ix = *row_ix;
@@ -833,37 +831,40 @@ impl ToGuiView {
                     .unwrap_or(row_ix);
 
                 // Navigate into the selected cell only.
-                if let Some(raw_row) = data_clone.raw.get(real_row) {
-                    if let Some(raw) = raw_row.get(col_ix).cloned() {
-                        let col_name = data_clone.columns.get(col_ix).map_or("?", |s| s.as_str());
-                        let title = format!("row[{}].{}", real_row, col_name);
-                        match &raw {
-                            Value::Record { .. } => {
-                                let nested = crate::value_conv::values_to_table_with_closure_sources_and_config(
-                                    &[raw.clone()],
+                if let Some(raw_row) = data_clone.raw.get(real_row)
+                    && let Some(raw) = raw_row.get(col_ix).cloned()
+                {
+                    let col_name = data_clone.columns.get(col_ix).map_or("?", |s| s.as_str());
+                    let title = format!("row[{}].{}", real_row, col_name);
+                    match &raw {
+                        Value::Record { .. } => {
+                            let nested =
+                                crate::value_conv::values_to_table_with_closure_sources_and_config(
+                                    std::slice::from_ref(&raw),
                                     true,
-                                    &closure_sources_c,
-                                    &table_config_c,
-                                    rfc3339,
+                                    &settings_c.closure_sources,
+                                    &settings_c.table_config,
+                                    settings_c.rfc3339,
                                 );
-                                view.push_page(window, cx, nested, title, autosize_c, &cc_clone);
-                            }
-                            Value::List { vals, .. } if !vals.is_empty() => {
-                                let nested = crate::value_conv::values_to_table_with_closure_sources_and_config(
+                            view.push_page(window, cx, nested, title);
+                        }
+                        Value::List { vals, .. } if !vals.is_empty() => {
+                            let nested =
+                                crate::value_conv::values_to_table_with_closure_sources_and_config(
                                     vals,
                                     true,
-                                    &closure_sources_c,
-                                    &table_config_c,
-                                    rfc3339,
+                                    &settings_c.closure_sources,
+                                    &settings_c.table_config,
+                                    settings_c.rfc3339,
                                 );
-                                view.push_page(window, cx, nested, title, autosize_c, &cc_clone);
-                            }
-                            _ => {}
+                            view.push_page(window, cx, nested, title);
                         }
+                        _ => {}
                     }
                 }
             }
-        }).detach();
+        })
+        .detach();
 
         (fi, ts)
     }
@@ -874,20 +875,8 @@ impl ToGuiView {
         cx: &mut Context<ToGuiView>,
         data: TableData,
         title: String,
-        autosize: bool,
-        cc: &ColorConfig,
     ) {
-        let (fi, ts) = Self::build_page(
-            window,
-            cx,
-            &data,
-            None,
-            autosize,
-            cc,
-            self.closure_sources.clone(),
-            self.table_config.clone(),
-            self.rfc3339,
-        );
+        let (fi, ts) = Self::build_page(window, cx, &data, None, &self.settings);
 
         let page = NavPage {
             title,
@@ -1243,16 +1232,18 @@ fn build_app() -> Result<Application> {
 
 /// Launch the GUI.
 #[cfg(not(test))]
-pub fn run_table_gui(
-    table: TableData,
-    initial_filter: Option<String>,
-    autosize: bool,
-    color_config: ColorConfig,
-    save_dir: String,
-    closure_sources: HashMap<usize, String>,
-    table_config: Config,
-    rfc3339: bool,
-) -> Result<()> {
+pub fn run_table_gui(launch: GuiLaunch) -> Result<()> {
+    let GuiLaunch {
+        table,
+        initial_filter,
+        autosize,
+        color_config,
+        save_dir,
+        closure_sources,
+        table_config,
+        rfc3339,
+    } = launch;
+
     let app = build_app()?;
 
     // Pre-compute the ideal size outside app.run so we can borrow `table`.
@@ -1394,14 +1385,16 @@ pub fn run_table_gui(
                     ToGuiView::new(
                         window,
                         cx,
-                        table.clone(),
-                        initial_filter.clone(),
-                        autosize,
-                        cc,
-                        save_dir,
-                        closure_sources2,
-                        table_config2,
-                        rfc3339_2,
+                        GuiLaunch {
+                            table: table.clone(),
+                            initial_filter: initial_filter.clone(),
+                            autosize,
+                            color_config: cc,
+                            save_dir,
+                            closure_sources: closure_sources2,
+                            table_config: table_config2,
+                            rfc3339: rfc3339_2,
+                        },
                     )
                 });
                 cx.new(|cx| Root::new(view, window, cx))
@@ -1414,16 +1407,7 @@ pub fn run_table_gui(
 }
 
 #[cfg(test)]
-pub fn run_table_gui(
-    _table: TableData,
-    _filter: Option<String>,
-    _autosize: bool,
-    _color_config: ColorConfig,
-    _save_dir: String,
-    _closure_sources: HashMap<usize, String>,
-    _table_config: Config,
-    _rfc3339: bool,
-) -> anyhow::Result<()> {
+pub fn run_table_gui(_launch: GuiLaunch) -> anyhow::Result<()> {
     Ok(())
 }
 
