@@ -1250,6 +1250,22 @@ pub fn run_table_gui(launch: GuiLaunch) -> Result<()> {
     let size = ideal_window_size(&table, autosize);
 
     app.run(move |cx| {
+        if let Some(path) = crate::nerd_glyphs::find_nerd_font() {
+            if let Ok(bytes) = std::fs::read(&path) {
+                if let Err(err) = cx
+                    .text_system()
+                    .add_fonts(vec![std::borrow::Cow::Owned(bytes)])
+                {
+                    eprintln!(
+                        "to-gui: failed to load Nerd Font at {}: {err:#}",
+                        path.display()
+                    );
+                } else {
+                    eprintln!("to-gui: loaded Nerd Font from {}", path.display());
+                }
+            }
+        }
+
         gpui_component::init(cx);
         Theme::change(ThemeMode::Dark, None, cx);
         cx.activate(true);
