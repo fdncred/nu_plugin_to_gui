@@ -39,10 +39,10 @@ The intent is to show the output of Nushell commands in a GUI.
 - `src/color_utils.rs`: shared color/style helper utilities.
 - `src/table_data.rs`: shared table model passed between conversion and GUI layers.
 - `src/value_conv/`: Nushell value conversion pipeline.
-	- `mod.rs`: public conversion API and tests.
-	- `closure.rs`: closure source extraction/highlighting helpers.
-	- `stringify.rs`: value-to-display-string conversion.
-	- `table.rs`: table-shaping logic from incoming pipeline data.
+  - `mod.rs`: public conversion API and tests.
+  - `closure.rs`: closure source extraction/highlighting helpers.
+  - `stringify.rs`: value-to-display-string conversion.
+  - `table.rs`: table-shaping logic from incoming pipeline data.
 - `src/gui.rs`: primary GUI view/delegate, interactions, and app runtime glue.
 - `src/gui_ansi.rs`: ANSI segment parsing for colored text rendering in cells.
 - `src/window_sizing.rs`: initial window-size calculation logic.
@@ -52,34 +52,50 @@ The intent is to show the output of Nushell commands in a GUI.
 
 ```mermaid
 flowchart TD
-	A["Nushell pipeline input<br/>example command: ls | to gui"] --> B[src/main.rs<br/>serve plugin]
-	B --> C[src/plugin_command.rs<br/>ToGuiCommand::run]
+ A["Nushell pipeline input<br/>example command: ls | to gui"] --> B[src/main.rs<br/>serve plugin]
+ B --> C[src/plugin_command.rs<br/>ToGuiCommand::run]
 
-	C --> D[src/value_conv/table.rs<br/>values_to_table_*]
-	C --> E[src/value_conv/stringify.rs<br/>value_to_string_with_engine]
-	C --> F[src/value_conv/closure.rs<br/>collect_closure_sources_*]
-	C --> G[src/color_config.rs<br/>build_runtime_color_config]
+ C --> D[src/value_conv/table.rs<br/>values_to_table_*]
+ C --> E[src/value_conv/stringify.rs<br/>value_to_string_with_engine]
+ C --> F[src/value_conv/closure.rs<br/>collect_closure_sources_*]
+ C --> G[src/color_config.rs<br/>build_runtime_color_config]
 
-	D --> H[src/table_data.rs<br/>TableData]
-	E --> H
-	F --> I[closure source cache]
-	G --> J[ColorConfig]
+ D --> H[src/table_data.rs<br/>TableData]
+ E --> H
+ F --> I[closure source cache]
+ G --> J[ColorConfig]
 
-	H --> K[src/gui.rs<br/>run_table_gui]
-	I --> K
-	J --> K
+ H --> K[src/gui.rs<br/>run_table_gui]
+ I --> K
+ J --> K
 
-	K --> L[src/window_sizing.rs<br/>ideal_window_size]
-	K --> M[src/gui_ansi.rs<br/>parse_ansi_segments]
-	K --> N[Interactive table window]
+ K --> L[src/window_sizing.rs<br/>ideal_window_size]
+ K --> M[src/gui_ansi.rs<br/>parse_ansi_segments]
+ K --> N[Interactive table window]
 
-	N --> O[Sort / filter / copy cell]
-	N --> P[Double-click nested values]
-	P --> D
-	N --> Q[Save as JSON]
+ N --> O[Sort / filter / copy cell]
+ N --> P[Double-click nested values]
+ P --> D
+ N --> Q[Save as JSON]
 ```
 
 ## Getting Started
+
+### Nerd Font support
+
+If any Nerd Font is installed on your system, glyph icons from tools like `eza` or `lsd` will render automatically with no configuration needed. We prefer `font-symbols-only-nerd-font` as it is the lightest option and only contains the symbols.
+
+Installation commands:
+
+- **macOS:** `brew install --cask font-symbols-only-nerd-font`
+- **Windows (Scoop, user install, no admin required):**
+
+  ```powershell
+  scoop bucket add nerd-fonts
+  scoop install nerd-fonts/NerdFontsSymbolsOnly
+  ```
+
+- **Linux:** Install via your distro package manager or download from [https://www.nerdfonts.com/font-downloads](https://www.nerdfonts.com/font-downloads).
 
 ### Platform prerequisites
 
@@ -90,21 +106,23 @@ On Linux and FreeBSD, the build performs an early dependency check and reports m
 If both `WAYLAND_DISPLAY` and `DISPLAY` are present and Wayland initialization fails, `to gui` automatically retries with X11. Set `TO_GUI_FORCE_WAYLAND=1` to disable this fallback.
 
 - install development packages for XCB and XKB before building.
-	- Debian/Ubuntu: `sudo apt install libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev`
-	- Fedora: `sudo dnf install libxcb-devel libxkbcommon-devel libxkbcommon-x11-devel`
-	- Arch: `sudo pacman -S libxcb libxkbcommon xorg-xkbcommon`
+  - Debian/Ubuntu: `sudo apt install libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev`
+  - Fedora: `sudo dnf install libxcb-devel libxkbcommon-devel libxkbcommon-x11-devel`
+  - Arch: `sudo pacman -S libxcb libxkbcommon xorg-xkbcommon`
 
 #### MacOS
 
 On macOS, this project enables `gpui` runtime shader compilation (`runtime_shaders`) to avoid requiring the separate Metal Toolchain component during `cargo build`.
 
-	- Install Xcode Command Line Tools: `xcode-select --install`
-	- If prompted, open Xcode once and accept the license.
+- Install Xcode Command Line Tools: `xcode-select --install`
+- If prompted, open Xcode once and accept the license.
 
 #### Windows
+
 - use the MSVC Rust target (`x86_64-pc-windows-msvc`) with Visual Studio Build Tools.
 
 ### Building
+
 1. Clone the repository and ensure you have Rust installed (edition 2024).
 2. Run `cargo build` to compile the project or `cargo install --path .`. Dependencies are fetched from the Nushell GitHub repo.
 3. Register the plugin with `plugin add /path/to/nu_plugin_to_gui`.
@@ -114,6 +132,5 @@ On macOS, this project enables `gpui` runtime shader compilation (`runtime_shade
 `to gui` launches the window asynchronously: Nushell returns to the prompt immediately while the GUI stays open in its own app event loop.
 
 _Note:_ the project is in early development and primarily intended for internal tooling or experimentation.
-
 
 Feel free to open issues or contribute enhancements.
