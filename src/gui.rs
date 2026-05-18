@@ -158,6 +158,8 @@ pub struct NushellTableDelegate {
     right_clicked_col: Option<usize>,
     /// Last clicked column index (used by double-click drilldown without forcing table scroll).
     last_clicked_col: Option<usize>,
+    /// Nerd Font family to use for fallback rendering.
+    nerd_font_family: Option<String>,
 }
 
 impl NushellTableDelegate {
@@ -166,6 +168,7 @@ impl NushellTableDelegate {
         autosize: bool,
         color_config: ColorConfig,
         column_filter_inputs: Vec<Entity<InputState>>,
+        nerd_font_family: Option<String>,
     ) -> Self {
         let num_cols = data.columns.len();
         let count = data.rows.len();
@@ -217,6 +220,7 @@ impl NushellTableDelegate {
             column_filter_inputs,
             right_clicked_col: None,
             last_clicked_col: None,
+            nerd_font_family,
         }
     }
 
@@ -490,6 +494,15 @@ impl TableDelegate for NushellTableDelegate {
         let mut has_ansi_segments = false;
 
         let mut div = gpui::div().size_full();
+
+        // Apply Nerd Font fallbacks if available
+        if let Some(ref font_family) = self.nerd_font_family {
+            div = div.font(gpui::Font {
+                fallbacks: Some(gpui::FontFallbacks::from_fonts(vec![font_family.clone()])),
+                ..gpui::font(".SystemUIFont")
+            });
+        }
+
         if let Some(segments) = parse_ansi_segments(&text) {
             has_ansi_segments = true;
             let mut text_row = gpui::div().h_flex().gap_0().w_full();
@@ -609,6 +622,7 @@ struct ViewSettings {
     closure_sources: Arc<HashMap<usize, String>>,
     table_config: Arc<Config>,
     rfc3339: bool,
+    nerd_font_family: Option<String>,
 }
 
 impl ToGuiView {
@@ -622,7 +636,11 @@ impl ToGuiView {
             closure_sources,
             table_config,
             rfc3339,
+            nerd_font_family,
         } = launch;
+        let nerd_font_family = nerd_font_family.or_else(|| {
+            crate::nerd_glyphs::find_nerd_font_family(&cx.text_system().all_font_names())
+        });
 
         let root_data = table_data.clone();
         let closure_sources = Arc::new(closure_sources);
@@ -633,6 +651,7 @@ impl ToGuiView {
             closure_sources: closure_sources.clone(),
             table_config: table_config.clone(),
             rfc3339,
+            nerd_font_family,
         });
 
         let (fi, ts) = Self::build_page(window, cx, &table_data, initial_filter, &settings);
@@ -754,6 +773,7 @@ impl ToGuiView {
             settings.autosize,
             settings.color_config.clone(),
             col_inputs,
+            settings.nerd_font_family.clone(),
         );
 
         let ts = cx.new(|cx| {
@@ -1242,6 +1262,7 @@ pub fn run_table_gui(launch: GuiLaunch) -> Result<()> {
         closure_sources,
         table_config,
         rfc3339,
+        nerd_font_family,
     } = launch;
 
     let app = build_app()?;
@@ -1251,6 +1272,11 @@ pub fn run_table_gui(launch: GuiLaunch) -> Result<()> {
 
     app.run(move |cx| {
         gpui_component::init(cx);
+
+        let nerd_font_family2 = nerd_font_family.clone();
+        if let Some(ref name) = nerd_font_family2 {
+            eprintln!("to-gui: using Nerd Font family: {name}");
+        }
         Theme::change(ThemeMode::Dark, None, cx);
         cx.activate(true);
 
@@ -1382,20 +1408,21 @@ pub fn run_table_gui(launch: GuiLaunch) -> Result<()> {
                 let cc = color_config.clone();
                 let save_dir = save_dir.clone();
                 let view = cx.new(|cx| {
-                    ToGuiView::new(
-                        window,
-                        cx,
-                        GuiLaunch {
-                            table: table.clone(),
-                            initial_filter: initial_filter.clone(),
-                            autosize,
-                            color_config: cc,
-                            save_dir,
-                            closure_sources: closure_sources2,
-                            table_config: table_config2,
-                            rfc3339: rfc3339_2,
-                        },
-                    )
+                ToGuiView::new(
+                    window,
+                    cx,
+                    GuiLaunch {
+                        table: table.clone(),
+                        initial_filter: initial_filter.clone(),
+                        autosize,
+                        color_config: cc,
+                        save_dir,
+                        closure_sources: closure_sources2,
+                        table_config: table_config2,
+                        rfc3339: rfc3339_2,
+                        nerd_font_family: nerd_font_family2,
+                    },
+                )
                 });
                 cx.new(|cx| Root::new(view, window, cx))
             })?;

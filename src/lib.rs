@@ -12,6 +12,7 @@ pub mod gui;
 pub mod gui_ansi;
 #[cfg(not(test))]
 pub mod gui_dispatch;
+pub mod nerd_glyphs;
 pub mod plugin_command;
 pub mod table_data;
 pub mod value_conv;

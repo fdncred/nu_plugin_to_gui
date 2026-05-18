@@ -88,6 +88,7 @@ impl PluginCommand for ToGuiCommand {
             closure_sources,
             table_config: (*nu_config).clone(),
             rfc3339,
+            nerd_font_family: None,
         };
 
         #[cfg(test)]
