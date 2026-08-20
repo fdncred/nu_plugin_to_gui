@@ -110,7 +110,7 @@ fn values_to_table_with_engine(
 
     for v in values.iter().flat_map(|val| match val {
         Value::List { vals, .. } => vals.clone(),
-        _ => vec![val.clone()],
+        _ => vec![val.clone()].into(),
     }) {
         match &v {
             Value::Record { val: rec, .. } => {
