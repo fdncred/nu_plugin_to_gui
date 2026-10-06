@@ -2623,6 +2623,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "gpui-kit"
+version = "0.7.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "be18e0417095ebfea77ac25962961ff4e41a120ea6cb8f05a7505b682478b83e"
+dependencies = [
+ "gpui-base",
+ "gpui-component",
+ "gpui-kit-assets",
+ "gpui-pre",
+ "gpui-pre-platform",
+ "gpui-pre-web",
+]
+
+[[package]]
 name = "gpui-kit-assets"
 version = "0.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4867,10 +4881,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "chrono",
- "gpui-component",
- "gpui-kit-assets",
- "gpui-pre",
- "gpui-pre-platform",
+ "gpui-kit",
  "lscolors",
  "nu-ansi-term",
  "nu-color-config",

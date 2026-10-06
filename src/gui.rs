@@ -11,13 +11,15 @@ use crate::gui_ansi::parse_ansi_segments;
 use crate::gui_dispatch::GuiLaunch;
 use crate::window_sizing::ideal_window_size;
 use anyhow::{Result, anyhow};
+use gpui::component::button::{Button, ButtonVariants as _};
+use gpui::component::input::{Input, InputEvent, InputState};
+use gpui::component::menu::{DropdownMenu as _, PopupMenu, PopupMenuItem};
+use gpui::component::table::{
+    Column, ColumnSort, DataTable, TableDelegate, TableEvent, TableState,
+};
+use gpui::component::{Root, StyledExt, Theme, ThemeMode};
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
-use gpui_component::button::{Button, ButtonVariants as _};
-use gpui_component::input::{Input, InputEvent, InputState};
-use gpui_component::menu::{DropdownMenu as _, PopupMenu, PopupMenuItem};
-use gpui_component::table::{Column, ColumnSort, DataTable, TableDelegate, TableEvent, TableState};
-use gpui_component::{Root, StyledExt, Theme, ThemeMode};
 use nu_protocol::{Config, Value};
 use std::any::Any;
 use std::collections::HashMap;
@@ -1184,7 +1186,7 @@ fn panic_payload_to_string(payload: Box<dyn Any + Send>) -> String {
 
 #[cfg(not(test))]
 fn build_app() -> Result<Application> {
-    let make_app = || gpui_platform::application().with_assets(gpui_kit_assets::Assets);
+    let make_app = || gpui::application().with_assets(gpui::assets::Assets);
 
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     {
@@ -1250,7 +1252,7 @@ pub fn run_table_gui(launch: GuiLaunch) -> Result<()> {
     let size = ideal_window_size(&table, autosize);
 
     app.run(move |cx| {
-        gpui_component::init(cx);
+        gpui::init(cx);
         Theme::change(ThemeMode::Dark, None, cx);
         cx.activate(true);
 
