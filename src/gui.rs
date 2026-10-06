@@ -16,7 +16,7 @@ use gpui::*;
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::menu::{DropdownMenu as _, PopupMenu, PopupMenuItem};
-use gpui_component::table::{Column, ColumnSort, Table, TableDelegate, TableEvent, TableState};
+use gpui_component::table::{Column, ColumnSort, DataTable, TableDelegate, TableEvent, TableState};
 use gpui_component::{Root, StyledExt, Theme, ThemeMode};
 use nu_protocol::{Config, Value};
 use std::any::Any;
@@ -423,8 +423,8 @@ impl TableDelegate for NushellTableDelegate {
     fn rows_count(&self, _: &App) -> usize {
         self.visible_rows.len()
     }
-    fn column(&self, col_ix: usize, _: &App) -> &Column {
-        &self.columns[col_ix]
+    fn column(&self, col_ix: usize, _: &App) -> Column {
+        self.columns[col_ix].clone()
     }
 
     fn render_th(
@@ -1158,7 +1158,7 @@ impl Render for ToGuiView {
             .child(menu_bar)
             .child(toolbar)
             .child(
-                Table::new(&self.table_state)
+                DataTable::new(&self.table_state)
                     .stripe(true)
                     .bordered(true)
                     .scrollbar_visible(true, true),
@@ -1184,7 +1184,7 @@ fn panic_payload_to_string(payload: Box<dyn Any + Send>) -> String {
 
 #[cfg(not(test))]
 fn build_app() -> Result<Application> {
-    let make_app = || Application::new().with_assets(gpui_component_assets::Assets);
+    let make_app = || gpui_platform::application().with_assets(gpui_kit_assets::Assets);
 
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     {
@@ -1254,7 +1254,7 @@ pub fn run_table_gui(launch: GuiLaunch) -> Result<()> {
         Theme::change(ThemeMode::Dark, None, cx);
         cx.activate(true);
 
-        cx.on_window_closed(|cx| {
+        cx.on_window_closed(|cx, _| {
             if cx.windows().is_empty() {
                 cx.quit();
             }
@@ -1267,6 +1267,7 @@ pub fn run_table_gui(launch: GuiLaunch) -> Result<()> {
         cx.set_menus(vec![
             Menu {
                 name: "File".into(),
+                disabled: false,
                 items: vec![
                     MenuItem::action("Save As…", SaveAction),
                     MenuItem::separator(),
@@ -1275,6 +1276,7 @@ pub fn run_table_gui(launch: GuiLaunch) -> Result<()> {
             },
             Menu {
                 name: "Edit".into(),
+                disabled: false,
                 items: vec![
                     MenuItem::action("Undo", UndoAction),
                     MenuItem::action("Redo", RedoAction),
@@ -1285,6 +1287,7 @@ pub fn run_table_gui(launch: GuiLaunch) -> Result<()> {
             },
             Menu {
                 name: "View".into(),
+                disabled: false,
                 items: vec![
                     MenuItem::action("Reload", ReloadAction),
                     MenuItem::action("Zoom In", ZoomInAction),
@@ -1293,10 +1296,12 @@ pub fn run_table_gui(launch: GuiLaunch) -> Result<()> {
             },
             Menu {
                 name: "Options".into(),
+                disabled: false,
                 items: vec![MenuItem::action("Preferences", PreferencesAction)],
             },
             Menu {
                 name: "Window".into(),
+                disabled: false,
                 items: vec![
                     MenuItem::action("Minimize", MinimizeAction),
                     MenuItem::action("Zoom", ZoomWindowAction),
@@ -1304,6 +1309,7 @@ pub fn run_table_gui(launch: GuiLaunch) -> Result<()> {
             },
             Menu {
                 name: "Help".into(),
+                disabled: false,
                 items: vec![MenuItem::action("About", AboutAction)],
             },
         ]);

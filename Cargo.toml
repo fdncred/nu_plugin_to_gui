@@ -15,9 +15,16 @@ nu-ansi-term = "0.50.3"
 lscolors = "0.21.0"
 
 # GUI libraries
-gpui = { version = "0.2.2", features = ["runtime_shaders"] }
-gpui-component = "0.5.1"
-gpui-component-assets = "0.5.1"
+# gpui-component 0.7 is built on the `gpui-pre` snapshot; platform backends live in a separate crate.
+gpui = { package = "gpui-pre", version = "=0.3.8" }
+gpui_platform = { package = "gpui-pre-platform", version = "=0.3.8", features = [
+    "font-kit",
+    "x11",
+    "wayland",
+    "runtime_shaders",
+] }
+gpui-component = "0.7.1"
+gpui-kit-assets = "0.7.1"
 anyhow = "1.0.104"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
