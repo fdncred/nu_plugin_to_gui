@@ -13,6 +13,7 @@ pub mod gui_ansi;
 #[cfg(not(test))]
 pub mod gui_dispatch;
 pub mod plugin_command;
+pub mod settings;
 pub mod table_data;
 pub mod value_conv;
 #[cfg(not(test))]
@@ -22,7 +23,7 @@ pub mod window_sizing;
 pub use gui::{CellStyle, ColorConfig};
 
 #[cfg(test)]
-#[derive(Clone, Default)]
+#[derive(Clone, Copy, Debug, Default)]
 pub struct CellStyle {
     pub fg: Option<gpui::Rgba>,
     pub bg: Option<gpui::Rgba>,
@@ -38,7 +39,7 @@ pub struct ColorConfig {
     pub default_style: CellStyle,
     pub use_ls_colors: bool,
     pub header_style: CellStyle,
-    pub ls_colors: std::collections::HashMap<String, gpui::Rgba>,
+    pub ls_colors: std::collections::HashMap<String, CellStyle>,
 }
 
 pub use plugin_command::{ToGuiCommand, ToGuiPlugin};

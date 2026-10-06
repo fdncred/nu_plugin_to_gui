@@ -17,6 +17,8 @@ pub struct GuiLaunch {
     pub closure_sources: HashMap<usize, String>,
     pub table_config: Config,
     pub rfc3339: bool,
+    /// Base UI font size from `$env.config.plugins.to_gui.font_size`.
+    pub font_size: f32,
 }
 
 static GUI_REQUEST_TX: OnceLock<mpsc::Sender<GuiLaunch>> = OnceLock::new();

@@ -57,6 +57,8 @@ impl PluginCommand for ToGuiCommand {
         let no_autosize = call.has_flag("no-autosize")?;
         let rfc3339 = call.has_flag("rfc3339")?;
         let initial_filter: Option<String> = call.get_flag("filter")?;
+        let gui_settings =
+            crate::settings::GuiSettings::from_plugin_config(engine.get_plugin_config()?.as_ref())?;
 
         let transpose = !no_transpose;
         let autosize = !no_autosize;
@@ -88,6 +90,7 @@ impl PluginCommand for ToGuiCommand {
             closure_sources,
             table_config: (*nu_config).clone(),
             rfc3339,
+            font_size: gui_settings.font_size,
         };
 
         #[cfg(test)]
@@ -99,6 +102,7 @@ impl PluginCommand for ToGuiCommand {
             &closure_sources,
             rfc3339,
             &color_config,
+            &gui_settings,
         );
 
         #[cfg(not(test))]

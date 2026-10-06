@@ -6,18 +6,33 @@
 //! restores the previous page state (including table position/selection).
 
 use crate::TableData;
-use crate::color_utils::{style_cache_key, value_type_key};
+use crate::color_utils::{ensure_contrast, style_cache_key, value_type_key};
 use crate::gui_ansi::parse_ansi_segments;
 use crate::gui_dispatch::GuiLaunch;
-use crate::window_sizing::ideal_window_size;
+use crate::settings::{clamp_font_size, font_size_config_line};
+use crate::window_sizing::{
+    autosize_column_width, ideal_window_size, row_height, title_bar_height, unsized_column_width,
+};
 use anyhow::{Result, anyhow};
+use gpui::assets::IconName as LucideIcon;
+use gpui::base::Selectable as _;
+use gpui::component::breadcrumb::{Breadcrumb, BreadcrumbItem};
 use gpui::component::button::{Button, ButtonVariants as _};
+use gpui::component::empty::{
+    Empty, EmptyContent, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle,
+};
 use gpui::component::input::{Input, InputEvent, InputState};
-use gpui::component::menu::{DropdownMenu as _, PopupMenu, PopupMenuItem};
+use gpui::component::kbd::Kbd;
+use gpui::component::menu::{PopupMenu, PopupMenuItem};
+use gpui::component::notification::Notification;
+use gpui::component::status_bar::StatusBar;
 use gpui::component::table::{
     Column, ColumnSort, DataTable, TableDelegate, TableEvent, TableState,
 };
-use gpui::component::{Root, StyledExt, Theme, ThemeMode};
+use gpui::component::{
+    ActiveTheme as _, Disableable as _, Icon, IconName, Root, Sizable as _, StyledExt, Theme,
+    ThemeMode, TitleBar, WindowExt as _, h_flex, v_flex,
+};
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
 use nu_protocol::{Config, Value};
@@ -36,7 +51,7 @@ use serde_json::Value as JsonValue;
 /// Color assignments derived from `$env.config.color_config`.
 /// Each entry maps a nushell value-type key (e.g. `"int"`, `"string"`) to an
 /// `Rgba` color to use as the foreground for cells of that type.
-#[derive(Clone, Default)]
+#[derive(Clone, Copy, Debug, Default)]
 pub struct CellStyle {
     /// Foreground color.
     pub fg: Option<Rgba>,
@@ -59,7 +74,7 @@ pub struct ColorConfig {
     /// Style for column headers (from `color_config.header`).
     pub header_style: CellStyle,
     /// Parsed `$LS_COLORS` entries (`di`, `ln`, `*.rs`, ...).
-    pub ls_colors: HashMap<String, Rgba>,
+    pub ls_colors: HashMap<String, CellStyle>,
 }
 
 fn numeric_string_key(s: &str) -> Option<&'static str> {
@@ -122,23 +137,25 @@ macro_rules! define_action {
     };
 }
 
-// Action for File → Save.
+// Every action here is wired to a handler; menus only list what works.
 define_action!(SaveAction, "to-gui::save");
-define_action!(CloseAction, "to-gui::close");
-define_action!(UndoAction, "to-gui::undo");
-define_action!(RedoAction, "to-gui::redo");
+define_action!(CloseWindowAction, "to-gui::close-window");
+define_action!(QuitAction, "to-gui::quit");
 define_action!(CopyAction, "to-gui::copy");
-define_action!(PasteAction, "to-gui::paste");
-define_action!(ReloadAction, "to-gui::reload");
-define_action!(ZoomInAction, "to-gui::zoom-in");
-define_action!(ZoomOutAction, "to-gui::zoom-out");
-define_action!(PreferencesAction, "to-gui::preferences");
+define_action!(FindAction, "to-gui::find");
+define_action!(ToggleFiltersAction, "to-gui::toggle-filters");
+define_action!(ClearFiltersAction, "to-gui::clear-filters");
 define_action!(MinimizeAction, "to-gui::minimize");
 define_action!(ZoomWindowAction, "to-gui::zoom-window");
 define_action!(AboutAction, "to-gui::about");
-
-// Action emitted by the "Back" button.
 define_action!(BackAction, "to-gui::back");
+define_action!(ForwardAction, "to-gui::forward");
+define_action!(IncreaseFontSizeAction, "to-gui::increase-font-size");
+define_action!(DecreaseFontSizeAction, "to-gui::decrease-font-size");
+define_action!(ResetFontSizeAction, "to-gui::reset-font-size");
+
+/// Key context for the main view, used to scope key bindings.
+const KEY_CONTEXT: &str = "ToGui";
 
 // ---------------------------------------------------------------------------
 // TableDelegate implementation
@@ -160,6 +177,12 @@ pub struct NushellTableDelegate {
     right_clicked_col: Option<usize>,
     /// Last clicked column index (used by double-click drilldown without forcing table scroll).
     last_clicked_col: Option<usize>,
+    /// Render column headers as filter inputs instead of labels.
+    show_filter_inputs: bool,
+    /// Size columns to their content instead of a fixed width.
+    autosize: bool,
+    /// Base UI font size; column widths scale with it.
+    font_size: f32,
 }
 
 impl NushellTableDelegate {
@@ -168,6 +191,7 @@ impl NushellTableDelegate {
         autosize: bool,
         color_config: ColorConfig,
         column_filter_inputs: Vec<Entity<InputState>>,
+        font_size: f32,
     ) -> Self {
         let num_cols = data.columns.len();
         let count = data.rows.len();
@@ -189,25 +213,8 @@ impl NushellTableDelegate {
             }
         }
 
-        if autosize {
-            const CHAR_W: f32 = 8.0;
-            const CELL_EXTRA_W: f32 = 20.0;
-            const HEADER_EXTRA_W: f32 = 52.0;
-            for (col_ix, col) in columns.iter_mut().enumerate() {
-                let max_len = data
-                    .rows
-                    .iter()
-                    .map(|row| row.get(col_ix).map(|s| s.len()).unwrap_or(0))
-                    .max()
-                    .unwrap_or(0);
-                let cell_w = (max_len as f32) * CHAR_W + CELL_EXTRA_W;
-                let header_w = (col.name.len() as f32) * CHAR_W + HEADER_EXTRA_W;
-                col.width = cell_w.max(header_w).into();
-            }
-        }
-
         let original_order: Vec<usize> = (0..count).collect();
-        NushellTableDelegate {
+        let mut delegate = NushellTableDelegate {
             all_rows: data.rows,
             raw_rows: data.raw,
             visible_rows: original_order.clone(),
@@ -219,7 +226,54 @@ impl NushellTableDelegate {
             column_filter_inputs,
             right_clicked_col: None,
             last_clicked_col: None,
+            show_filter_inputs: false,
+            autosize,
+            font_size,
+        };
+        delegate.size_columns();
+        delegate
+    }
+
+    /// Change the font size and resize columns to match. The table must be
+    /// refreshed afterwards to pick up the new widths.
+    pub fn set_font_size(&mut self, font_size: f32) {
+        self.font_size = font_size;
+        self.size_columns();
+    }
+
+    fn size_columns(&mut self) {
+        for (col_ix, col) in self.columns.iter_mut().enumerate() {
+            let width = if self.autosize {
+                let max_len = self
+                    .all_rows
+                    .iter()
+                    .map(|row| row.get(col_ix).map(|s| s.len()).unwrap_or(0))
+                    .max()
+                    .unwrap_or(0);
+                autosize_column_width(max_len, col.name.len(), self.font_size)
+            } else {
+                unsized_column_width(self.font_size)
+            };
+            col.width = px(width);
         }
+    }
+
+    pub fn total_rows(&self) -> usize {
+        self.all_rows.len()
+    }
+
+    pub fn active_column_filters(&self) -> usize {
+        self.column_filters.iter().filter(|f| f.is_some()).count()
+    }
+
+    pub fn has_filters(&self) -> bool {
+        self.filter.is_some() || self.active_column_filters() > 0
+    }
+
+    pub fn clear_filters(&mut self) {
+        self.filter = None;
+        self.column_filters.iter_mut().for_each(|f| *f = None);
+        self.apply_filter();
     }
 
     fn apply_filter(&mut self) {
@@ -381,7 +435,7 @@ impl NushellTableDelegate {
         }
     }
 
-    fn ls_fg_for_name_cell(&self, real_row: usize, col_ix: usize) -> Option<Rgba> {
+    fn ls_style_for_name_cell(&self, real_row: usize, col_ix: usize) -> Option<CellStyle> {
         if !self.color_config.use_ls_colors {
             return None;
         }
@@ -402,16 +456,16 @@ impl NushellTableDelegate {
                 && dot + 1 < name.len()
             {
                 let ext = &name[dot + 1..];
-                if let Some(c) = self.color_config.ls_colors.get(&format!("*.{}", ext)) {
-                    return Some(*c);
+                if let Some(style) = self.color_config.ls_colors.get(&format!("*.{}", ext)) {
+                    return Some(*style);
                 }
             }
         }
 
         if let Some(ls_key) = self.ls_key_for_row_type(real_row)
-            && let Some(c) = self.color_config.ls_colors.get(ls_key)
+            && let Some(style) = self.color_config.ls_colors.get(ls_key)
         {
-            return Some(*c);
+            return Some(*style);
         }
 
         self.color_config.ls_colors.get("fi").copied()
@@ -432,35 +486,49 @@ impl TableDelegate for NushellTableDelegate {
     fn render_th(
         &mut self,
         col_ix: usize,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<TableState<Self>>,
     ) -> impl gpui::IntoElement {
         let name = self.columns[col_ix].name.clone();
-        if let Some(inp) = self.column_filter_inputs.get(col_ix) {
-            inp.update(cx, |state, cx| {
-                state.set_placeholder(name.clone(), window, cx);
-            });
+        if self.show_filter_inputs
+            && let Some(inp) = self.column_filter_inputs.get(col_ix)
+        {
+            return gpui::div()
+                .w_full()
+                .pr_1()
+                .child(Input::new(inp).xsmall().cleanable(true))
+                .into_any_element();
         }
 
-        let mut header = gpui::div().v_flex().gap_1().w_full();
-        if let Some(inp) = self.column_filter_inputs.get(col_ix) {
-            header = header.child(
-                Input::new(inp)
-                    .appearance(false)
-                    .bordered(false)
-                    .focus_bordered(false),
+        let filtered = self.column_filters.get(col_ix).is_some_and(|f| f.is_some());
+        let header_style = &self.color_config.header_style;
+        let mut label = h_flex()
+            .gap_1()
+            .min_w_0()
+            .font_weight(if header_style.bold {
+                FontWeight::BOLD
+            } else {
+                FontWeight::MEDIUM
+            })
+            .text_color(cx.theme().muted_foreground)
+            .child(gpui::div().truncate().child(name));
+        if let Some(c) = header_style.fg {
+            let header_bg = header_style
+                .bg
+                .unwrap_or_else(|| solid_color(cx.theme().table_head, cx));
+            label = label.text_color(ensure_contrast(c, header_bg));
+        }
+        if let Some(c) = header_style.bg {
+            label = label.bg(c);
+        }
+        if filtered {
+            label = label.child(
+                Icon::new(LucideIcon::Funnel)
+                    .xsmall()
+                    .text_color(cx.theme().blue),
             );
         }
-        if let Some(c) = self.color_config.header_style.fg {
-            header = header.text_color(c);
-        }
-        if let Some(c) = self.color_config.header_style.bg {
-            header = header.bg(c);
-        }
-        if self.color_config.header_style.bold {
-            header = header.font_weight(FontWeight::BOLD);
-        }
-        header
+        label.into_any_element()
     }
 
     fn render_td(
@@ -478,27 +546,35 @@ impl TableDelegate for NushellTableDelegate {
         } else {
             None
         };
-        let fg = self
-            .ls_fg_for_name_cell(real_row, col_ix)
+        let ls_style = self.ls_style_for_name_cell(real_row, col_ix);
+        let fg = ls_style
+            .and_then(|style| style.fg)
             .or_else(|| key_style.and_then(|style| style.fg))
             .or_else(|| self.cell_fg(raw));
         let bg = key_style
             .and_then(|style| style.bg)
             .or_else(|| self.cell_bg(raw));
-        let bold = key_style
-            .map(|style| style.bold)
-            .unwrap_or_else(|| self.cell_bold(raw));
+        // LS_COLORS backgrounds (e.g. README files) highlight the text itself,
+        // as `ls` does in a terminal, rather than the whole cell.
+        let chip_bg = ls_style.and_then(|style| style.bg);
+        let bold = ls_style.is_some_and(|style| style.bold)
+            || key_style
+                .map(|style| style.bold)
+                .unwrap_or_else(|| self.cell_bold(raw));
+        // Keep every color readable against what it is drawn on.
+        let cell_bg = bg.unwrap_or_else(|| table_background(cx));
+        let fg = fg.map(|c| ensure_contrast(c, chip_bg.unwrap_or(cell_bg)));
         let numeric = numeric_type_key_for_value(raw).is_some();
         let mut has_ansi_segments = false;
 
-        let mut div = gpui::div().size_full();
+        let mut div = gpui::div().size_full().flex().items_center();
         if let Some(segments) = parse_ansi_segments(&text) {
             has_ansi_segments = true;
             let mut text_row = gpui::div().h_flex().gap_0().w_full();
             for segment in segments.into_iter().filter(|seg| !seg.text.is_empty()) {
                 let mut part = gpui::div().child(segment.text);
                 if let Some(c) = segment.fg {
-                    part = part.text_color(c);
+                    part = part.text_color(ensure_contrast(c, cell_bg));
                 }
                 if segment.bold {
                     part = part.font_weight(FontWeight::BOLD);
@@ -506,6 +582,25 @@ impl TableDelegate for NushellTableDelegate {
                 text_row = text_row.child(part);
             }
             div = div.child(text_row);
+        } else if is_drillable(raw) {
+            // Nested values open on double-click; show that they lead somewhere.
+            div = div
+                .h_flex()
+                .gap_1()
+                .justify_between()
+                .text_color(cx.theme().muted_foreground)
+                .child(gpui::div().truncate().child(text))
+                .child(Icon::new(IconName::ChevronRight).xsmall());
+        } else if let Some(chip) = chip_bg {
+            div = div.child(
+                gpui::div()
+                    .ml(px(-3.))
+                    .px(px(3.))
+                    .rounded_sm()
+                    .bg(chip)
+                    .truncate()
+                    .child(text),
+            );
         } else {
             div = div.child(text);
         }
@@ -521,7 +616,7 @@ impl TableDelegate for NushellTableDelegate {
             div = div.font_weight(FontWeight::BOLD);
         }
         if numeric {
-            div = div.h_flex().justify_end();
+            div = div.justify_end();
         }
         div = div
             .on_mouse_down(
@@ -547,6 +642,15 @@ impl TableDelegate for NushellTableDelegate {
         _: &mut Window,
         _: &mut Context<TableState<Self>>,
     ) {
+        // Mirror the table's sort state so `TableState::refresh` (used when the
+        // font size changes) keeps the sort indicator.
+        for (ix, col) in self.columns.iter_mut().enumerate() {
+            col.sort = Some(if ix == col_ix {
+                sort
+            } else {
+                ColumnSort::Default
+            });
+        }
         match sort {
             ColumnSort::Ascending => self
                 .visible_rows
@@ -556,6 +660,54 @@ impl TableDelegate for NushellTableDelegate {
                 .sort_by(|a, b| self.all_rows[*b][col_ix].cmp(&self.all_rows[*a][col_ix])),
             ColumnSort::Default => self.visible_rows = self.original_order.clone(),
         }
+    }
+
+    fn render_empty(
+        &mut self,
+        _window: &mut Window,
+        cx: &mut Context<TableState<Self>>,
+    ) -> impl IntoElement {
+        let (icon, title, description) = if self.all_rows.is_empty() {
+            (
+                Icon::new(IconName::Inbox),
+                "No data",
+                "The pipeline produced nothing to show.",
+            )
+        } else {
+            (
+                Icon::new(LucideIcon::SearchX),
+                "No matching rows",
+                "Nothing matches the current search and filters.",
+            )
+        };
+        let can_clear = !self.all_rows.is_empty() && self.has_filters();
+
+        h_flex().size_full().justify_center().child(
+            Empty::new()
+                .header(
+                    EmptyHeader::new()
+                        .media(EmptyMedia::new().child(icon))
+                        .title(EmptyTitle::new().child(title))
+                        .description(
+                            EmptyDescription::new()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(description),
+                        ),
+                )
+                .when(can_clear, |empty| {
+                    empty.content(
+                        EmptyContent::new().child(
+                            Button::new("clear-filters")
+                                .outline()
+                                .small()
+                                .label("Clear filters")
+                                .on_click(|_, window, cx| {
+                                    window.dispatch_action(Box::new(ClearFiltersAction), cx)
+                                }),
+                        ),
+                    )
+                }),
+        )
     }
 
     fn context_menu(
@@ -573,10 +725,55 @@ impl TableDelegate for NushellTableDelegate {
             .and_then(|r| r.get(col_ix))
             .cloned()
             .unwrap_or_default();
-        menu.item(PopupMenuItem::new("Copy").on_click(move |_, _, cx| {
-            cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
-        }))
+        menu.item(
+            PopupMenuItem::new("Copy")
+                .icon(IconName::Copy)
+                .on_click(move |_, _, cx| {
+                    cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
+                }),
+        )
     }
+}
+
+/// `color` as an opaque color, using the window background where it is
+/// transparent (theme colors such as `table_head` may be).
+fn solid_color(color: Hsla, cx: &App) -> Rgba {
+    if color.a >= 1.0 {
+        color.to_rgb()
+    } else {
+        cx.theme().background.to_rgb()
+    }
+}
+
+/// The color table cells are drawn on.
+fn table_background(cx: &App) -> Rgba {
+    solid_color(cx.theme().table, cx)
+}
+
+/// Whether double-clicking a cell with this value opens a nested page.
+fn is_drillable(v: &Value) -> bool {
+    match v {
+        Value::Record { .. } => true,
+        Value::List { vals, .. } => !vals.is_empty(),
+        _ => false,
+    }
+}
+
+/// Format a count with thousands separators, e.g. `12,345`.
+fn fmt_count(n: usize) -> String {
+    let digits = n.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (i, ch) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(ch);
+    }
+    out
+}
+
+fn plural(n: usize, one: &str, many: &str) -> String {
+    format!("{} {}", fmt_count(n), if n == 1 { one } else { many })
 }
 
 // ---------------------------------------------------------------------------
@@ -585,17 +782,27 @@ impl TableDelegate for NushellTableDelegate {
 
 #[derive(Clone)]
 struct NavPage {
-    title: String,
+    /// Breadcrumb label: `root`, a record key, or `row.column`.
+    crumb: SharedString,
     filter_input: Entity<InputState>,
     table_state: Entity<TableState<NushellTableDelegate>>,
 }
 
 /// The main view. Holds a navigation stack of live page states.
 pub struct ToGuiView {
-    /// Navigation stack of live page states including table/input state.
+    /// Pages from the root to the current page.
     nav_stack: Vec<NavPage>,
+    /// Pages left by going back, most recent last.
+    forward_stack: Vec<NavPage>,
     filter_input: Entity<InputState>,
     table_state: Entity<TableState<NushellTableDelegate>>,
+    focus_handle: FocusHandle,
+    /// Whether column headers show filter inputs.
+    show_column_filters: bool,
+    /// Current base font size.
+    font_size: f32,
+    /// Font size from config.nu; Reset returns to it.
+    configured_font_size: f32,
     save_dir: String,
     status_message: String,
     /// Copy of the root data used by the Save button.
@@ -613,6 +820,18 @@ struct ViewSettings {
     rfc3339: bool,
 }
 
+/// Breadcrumb label for a drilled-into cell, in Nushell cell-path style.
+fn crumb_for_cell(data: &TableData, row: usize, col: usize) -> String {
+    let is_key_value = data.columns.len() == 2
+        && data.columns[0].eq_ignore_ascii_case("key")
+        && data.columns[1].eq_ignore_ascii_case("value");
+    if is_key_value && let Some(key) = data.rows.get(row).and_then(|r| r.first()) {
+        return key.clone();
+    }
+    let col_name = data.columns.get(col).map_or("?", |s| s.as_str());
+    format!("{row}.{col_name}")
+}
+
 impl ToGuiView {
     pub fn new(window: &mut Window, cx: &mut Context<ToGuiView>, launch: GuiLaunch) -> Self {
         let GuiLaunch {
@@ -624,31 +843,46 @@ impl ToGuiView {
             closure_sources,
             table_config,
             rfc3339,
+            font_size,
         } = launch;
+        let font_size = clamp_font_size(font_size);
 
         let root_data = table_data.clone();
-        let closure_sources = Arc::new(closure_sources);
-        let table_config = Arc::new(table_config);
         let settings = Arc::new(ViewSettings {
             autosize,
             color_config,
-            closure_sources: closure_sources.clone(),
-            table_config: table_config.clone(),
+            closure_sources: Arc::new(closure_sources),
+            table_config: Arc::new(table_config),
             rfc3339,
         });
 
-        let (fi, ts) = Self::build_page(window, cx, &table_data, initial_filter, &settings);
+        let (fi, ts) = Self::build_page(
+            window,
+            cx,
+            &table_data,
+            initial_filter,
+            &settings,
+            font_size,
+        );
 
         let root_page = NavPage {
-            title: "root".into(),
+            crumb: "root".into(),
             filter_input: fi.clone(),
             table_state: ts.clone(),
         };
 
+        let focus_handle = cx.focus_handle();
+        focus_handle.focus(window, cx);
+
         ToGuiView {
             nav_stack: vec![root_page],
+            forward_stack: Vec::new(),
             filter_input: fi,
             table_state: ts,
+            focus_handle,
+            show_column_filters: false,
+            font_size,
+            configured_font_size: font_size,
             save_dir,
             status_message: String::new(),
             root_data,
@@ -681,58 +915,41 @@ impl ToGuiView {
         std::fs::write(path, json)
     }
 
-    fn start_save_as(&mut self, cx: &mut Context<ToGuiView>) {
+    fn start_save_as(&mut self, window: &mut Window, cx: &mut Context<ToGuiView>) {
         let base_dir = PathBuf::from(&self.save_dir);
-        let suggested_name = "to-gui-output.json".to_string();
-        let receiver = cx.prompt_for_new_path(&base_dir, Some(&suggested_name));
+        let receiver = cx.prompt_for_new_path(&base_dir, Some("to-gui-output.json"));
 
-        cx.spawn(
-            move |view: WeakEntity<ToGuiView>, async_cx: &mut AsyncApp| {
-                let mut async_cx = async_cx.clone();
-                async move {
-                    let chosen = match receiver.await {
-                        Ok(Ok(path_opt)) => path_opt,
-                        Ok(Err(err)) => {
-                            let message = format!("Save failed: {}", err);
-                            let _ = view.update(&mut async_cx, |view, cx| {
-                                view.status_message = message;
-                                cx.notify();
-                            });
-                            return;
-                        }
-                        Err(err) => {
-                            let message = format!("Save failed: {}", err);
-                            let _ = view.update(&mut async_cx, |view, cx| {
-                                view.status_message = message;
-                                cx.notify();
-                            });
-                            return;
-                        }
-                    };
-
-                    match chosen {
-                        Some(path) => {
-                            let display = path.display().to_string();
-                            let _ = view.update(&mut async_cx, |view, cx| {
-                                match view.save_root_json_to(&path) {
-                                    Ok(()) => view.status_message = format!("Saved: {}", display),
-                                    Err(err) => {
-                                        view.status_message = format!("Save failed: {}", err)
-                                    }
-                                }
-                                cx.notify();
-                            });
-                        }
-                        None => {
-                            let _ = view.update(&mut async_cx, |view, cx| {
-                                view.status_message = "Save canceled".to_string();
-                                cx.notify();
-                            });
-                        }
+        cx.spawn_in(window, async move |view, cx| {
+            let chosen = match receiver.await {
+                Ok(Ok(Some(path))) => Ok(path),
+                Ok(Ok(None)) => return,
+                Ok(Err(err)) => Err(err.to_string()),
+                Err(err) => Err(err.to_string()),
+            };
+            let _ = view.update_in(cx, |view, window, cx| {
+                let saved = chosen.and_then(|path| {
+                    view.save_root_json_to(&path)
+                        .map(|()| path)
+                        .map_err(|err| err.to_string())
+                });
+                let note = match saved {
+                    Ok(path) => {
+                        view.status_message = format!("Saved {}", path.display());
+                        let name = path.file_name().map_or_else(
+                            || path.display().to_string(),
+                            |n| n.to_string_lossy().into_owned(),
+                        );
+                        Notification::success(format!("Saved {name}"))
                     }
-                }
-            },
-        )
+                    Err(err) => {
+                        view.status_message = format!("Save failed: {err}");
+                        Notification::error(format!("Save failed: {err}"))
+                    }
+                };
+                window.push_notification(note, cx);
+                cx.notify();
+            });
+        })
         .detach();
     }
 
@@ -743,10 +960,19 @@ impl ToGuiView {
         data: &TableData,
         initial_filter: Option<String>,
         settings: &Arc<ViewSettings>,
+        font_size: f32,
     ) -> (Entity<InputState>, Entity<TableState<NushellTableDelegate>>) {
         // Per-column filter inputs — owned by the delegate, rendered inside headers.
-        let col_inputs: Vec<Entity<InputState>> = (0..data.columns.len())
-            .map(|_| cx.new(|cx| InputState::new(window, cx)))
+        let col_inputs: Vec<Entity<InputState>> = data
+            .columns
+            .iter()
+            .map(|name| {
+                cx.new(|cx| {
+                    let mut input = InputState::new(window, cx);
+                    input.set_placeholder(name.clone(), window, cx);
+                    input
+                })
+            })
             .collect();
         // Keep a clone for subscriptions; the originals move into the delegate.
         let col_inputs_for_subs = col_inputs.clone();
@@ -756,6 +982,7 @@ impl ToGuiView {
             settings.autosize,
             settings.color_config.clone(),
             col_inputs,
+            font_size,
         );
 
         let ts = cx.new(|cx| {
@@ -769,7 +996,7 @@ impl ToGuiView {
 
         let fi = cx.new(|cx| InputState::new(window, cx));
         fi.update(cx, |input, cx| {
-            input.set_placeholder("Global search", window, cx);
+            input.set_placeholder("Search", window, cx);
         });
 
         // Global filter subscription
@@ -777,10 +1004,12 @@ impl ToGuiView {
         cx.subscribe_in(&fi, window, move |_v, input, event, _, cx| {
             if let InputEvent::Change = event {
                 let s = input.read(cx).value().to_string();
-                ts2.update(cx, |t, _| {
+                ts2.update(cx, |t, cx| {
                     t.delegate_mut()
                         .set_filter(if s.is_empty() { None } else { Some(s) });
+                    cx.notify();
                 });
+                cx.notify();
             }
         })
         .detach();
@@ -791,12 +1020,14 @@ impl ToGuiView {
             cx.subscribe_in(inp, window, move |_v, input, event, _, cx| {
                 if let InputEvent::Change = event {
                     let pat = input.read(cx).value().to_string();
-                    ts3.update(cx, |t, _| {
+                    ts3.update(cx, |t, cx| {
                         t.delegate_mut().set_column_filter(
                             col_ix,
                             if pat.is_empty() { None } else { Some(pat) },
                         );
+                        cx.notify();
                     });
+                    cx.notify();
                 }
             })
             .detach();
@@ -807,6 +1038,9 @@ impl ToGuiView {
             fi.update(cx, |i, cx| i.set_value(f.clone(), window, cx));
             ts.update(cx, |t, _| t.delegate_mut().set_filter(Some(f)));
         }
+
+        // Re-render the status bar when the selection changes.
+        cx.observe(&ts, |_, _, cx| cx.notify()).detach();
 
         // Subscribe to DoubleClickedRow to navigate into nested values
         let data_clone = data.clone();
@@ -836,8 +1070,7 @@ impl ToGuiView {
                 if let Some(raw_row) = data_clone.raw.get(real_row)
                     && let Some(raw) = raw_row.get(col_ix).cloned()
                 {
-                    let col_name = data_clone.columns.get(col_ix).map_or("?", |s| s.as_str());
-                    let title = format!("row[{}].{}", real_row, col_name);
+                    let crumb = crumb_for_cell(&data_clone, real_row, col_ix);
                     match &raw {
                         Value::Record { .. } => {
                             let nested =
@@ -848,7 +1081,7 @@ impl ToGuiView {
                                     &settings_c.table_config,
                                     settings_c.rfc3339,
                                 );
-                            view.push_page(window, cx, nested, title);
+                            view.push_page(window, cx, nested, crumb);
                         }
                         Value::List { vals, .. } if !vals.is_empty() => {
                             let nested =
@@ -859,7 +1092,7 @@ impl ToGuiView {
                                     &settings_c.table_config,
                                     settings_c.rfc3339,
                                 );
-                            view.push_page(window, cx, nested, title);
+                            view.push_page(window, cx, nested, crumb);
                         }
                         _ => {}
                     }
@@ -876,293 +1109,415 @@ impl ToGuiView {
         window: &mut Window,
         cx: &mut Context<ToGuiView>,
         data: TableData,
-        title: String,
+        crumb: String,
     ) {
-        let (fi, ts) = Self::build_page(window, cx, &data, None, &self.settings);
+        let (fi, ts) = Self::build_page(window, cx, &data, None, &self.settings, self.font_size);
+        let show = self.show_column_filters;
+        ts.update(cx, |t, _| t.delegate_mut().show_filter_inputs = show);
 
-        let page = NavPage {
-            title,
-            filter_input: fi.clone(),
-            table_state: ts.clone(),
-        };
+        self.forward_stack.clear();
+        self.nav_stack.push(NavPage {
+            crumb: crumb.into(),
+            filter_input: fi,
+            table_state: ts,
+        });
+        self.sync_current_page(cx);
+    }
 
-        self.nav_stack.push(page);
-        self.filter_input = fi;
-        self.table_state = ts;
+    fn sync_current_page(&mut self, cx: &mut Context<ToGuiView>) {
+        if let Some(page) = self.nav_stack.last() {
+            self.filter_input = page.filter_input.clone();
+            self.table_state = page.table_state.clone();
+        }
         cx.notify();
     }
 
-    fn pop_page(&mut self, _window: &mut Window, cx: &mut Context<ToGuiView>) {
-        if self.nav_stack.len() > 1 {
-            self.nav_stack.pop();
-            if let Some(page) = self.nav_stack.last().cloned() {
-                self.filter_input = page.filter_input;
-                self.table_state = page.table_state;
+    fn go_back(&mut self, cx: &mut Context<ToGuiView>) {
+        if self.nav_stack.len() > 1
+            && let Some(page) = self.nav_stack.pop()
+        {
+            self.forward_stack.push(page);
+            self.sync_current_page(cx);
+        }
+    }
+
+    fn go_forward(&mut self, cx: &mut Context<ToGuiView>) {
+        if let Some(page) = self.forward_stack.pop() {
+            self.nav_stack.push(page);
+            self.sync_current_page(cx);
+        }
+    }
+
+    /// Go back until the page at `depth` (0 = root) is current.
+    fn go_to_depth(&mut self, depth: usize, cx: &mut Context<ToGuiView>) {
+        while self.nav_stack.len() > depth + 1 {
+            self.go_back(cx);
+        }
+    }
+
+    fn focus_search(&mut self, window: &mut Window, cx: &mut Context<ToGuiView>) {
+        let handle = self.filter_input.read(cx).focus_handle(cx);
+        handle.focus(window, cx);
+    }
+
+    fn toggle_column_filters(&mut self, window: &mut Window, cx: &mut Context<ToGuiView>) {
+        self.show_column_filters = !self.show_column_filters;
+        let show = self.show_column_filters;
+        for page in self.nav_stack.iter().chain(self.forward_stack.iter()) {
+            page.table_state.update(cx, |t, cx| {
+                t.delegate_mut().show_filter_inputs = show;
+                cx.notify();
+            });
+        }
+
+        let first_input = self
+            .table_state
+            .read(cx)
+            .delegate()
+            .column_filter_inputs
+            .first()
+            .cloned();
+        match first_input {
+            Some(input) if show => input.read(cx).focus_handle(cx).focus(window, cx),
+            _ => self.focus_handle.focus(window, cx),
+        }
+        cx.notify();
+    }
+
+    fn clear_filters(&mut self, window: &mut Window, cx: &mut Context<ToGuiView>) {
+        let inputs: Vec<Entity<InputState>> = std::iter::once(self.filter_input.clone())
+            .chain(
+                self.table_state
+                    .read(cx)
+                    .delegate()
+                    .column_filter_inputs
+                    .iter()
+                    .cloned(),
+            )
+            .collect();
+        for input in inputs {
+            input.update(cx, |state, cx| state.set_value("", window, cx));
+        }
+        self.table_state.update(cx, |t, cx| {
+            t.delegate_mut().clear_filters();
+            cx.notify();
+        });
+        cx.notify();
+    }
+
+    /// Copy the selected cell, or the selected row as tab-separated text.
+    fn copy_selection(&mut self, cx: &mut Context<ToGuiView>) {
+        let text = {
+            let table = self.table_state.read(cx);
+            let d = table.delegate();
+            if let Some((row, col)) = table.selected_cell() {
+                d.visible_rows
+                    .get(row)
+                    .and_then(|&r| d.all_rows[r].get(col))
+                    .cloned()
+            } else if let Some(row) = table.selected_row() {
+                d.visible_rows.get(row).map(|&r| d.all_rows[r].join("\t"))
+            } else {
+                None
             }
+        };
+        if let Some(text) = text {
+            cx.write_to_clipboard(ClipboardItem::new_string(text));
+            self.status_message = "Copied to clipboard".to_string();
             cx.notify();
         }
     }
 
-    fn can_go_back(&self) -> bool {
-        self.nav_stack.len() > 1
+    /// Apply a new base font size to the theme and every page's columns.
+    ///
+    /// The change lasts for this window; config.nu holds the size used at
+    /// launch (see [`Self::copy_font_size_setting`]).
+    fn set_font_size(&mut self, font_size: f32, cx: &mut Context<ToGuiView>) {
+        let font_size = clamp_font_size(font_size);
+        if font_size == self.font_size {
+            return;
+        }
+        self.font_size = font_size;
+        Theme::update(cx, |theme| theme.font_size = px(font_size));
+        for page in self.nav_stack.iter().chain(self.forward_stack.iter()) {
+            page.table_state.update(cx, |t, cx| {
+                t.delegate_mut().set_font_size(font_size);
+                t.refresh(cx);
+            });
+        }
+        cx.notify();
     }
 
-    fn current_title(&self) -> String {
-        self.nav_stack
-            .last()
-            .map(|page| page.title.clone())
-            .unwrap_or_default()
+    /// Copy the config.nu line that makes the current size the default.
+    fn copy_font_size_setting(&mut self, window: &mut Window, cx: &mut Context<ToGuiView>) {
+        cx.write_to_clipboard(ClipboardItem::new_string(font_size_config_line(
+            self.font_size,
+        )));
+        window.push_notification(
+            Notification::success(format!(
+                "Paste into config.nu to open at {}px next time",
+                self.font_size
+            ))
+            .title("Copied font size setting"),
+            cx,
+        );
+    }
+
+    fn render_font_size_control(&self, cx: &mut Context<ToGuiView>) -> impl IntoElement {
+        let changed = self.font_size != self.configured_font_size;
+        h_flex()
+            .gap_0p5()
+            .when(changed, |this| {
+                this.child(
+                    Button::new("copy-font-size")
+                        .ghost()
+                        .xsmall()
+                        .icon(IconName::Copy)
+                        .label("Copy setting")
+                        .tooltip("Copy the config.nu line that keeps this font size")
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.copy_font_size_setting(window, cx)
+                        })),
+                )
+            })
+            .child(
+                Button::new("font-smaller")
+                    .ghost()
+                    .xsmall()
+                    .icon(LucideIcon::Minus)
+                    .tooltip_with_action("Decrease font size", &DecreaseFontSizeAction, None)
+                    .on_click(
+                        cx.listener(|this, _, _, cx| this.set_font_size(this.font_size - 1.0, cx)),
+                    ),
+            )
+            .child(
+                Button::new("font-reset")
+                    .ghost()
+                    .xsmall()
+                    .label(format!("{}px", self.font_size))
+                    .tooltip_with_action("Reset font size", &ResetFontSizeAction, None)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.set_font_size(this.configured_font_size, cx)
+                    })),
+            )
+            .child(
+                Button::new("font-larger")
+                    .ghost()
+                    .xsmall()
+                    .icon(LucideIcon::Plus)
+                    .tooltip_with_action("Increase font size", &IncreaseFontSizeAction, None)
+                    .on_click(
+                        cx.listener(|this, _, _, cx| this.set_font_size(this.font_size + 1.0, cx)),
+                    ),
+            )
+    }
+
+    fn show_about(&mut self, window: &mut Window, cx: &mut Context<ToGuiView>) {
+        window.open_dialog(cx, |dialog, _, cx| {
+            dialog.title("to gui").w(px(380.)).child(
+                v_flex()
+                    .gap_2()
+                    .text_sm()
+                    .child(format!("Version {}", env!("CARGO_PKG_VERSION")))
+                    .child(
+                        gpui::div()
+                            .text_color(cx.theme().muted_foreground)
+                            .child("A Nushell plugin that opens pipeline data in a desktop table viewer. Built with GPUI Kit."),
+                    ),
+            )
+        });
+    }
+
+    fn render_title_bar(&self, cx: &mut Context<ToGuiView>) -> impl IntoElement {
+        let depth = self.nav_stack.len();
+        let crumbs: Vec<BreadcrumbItem> = self
+            .nav_stack
+            .iter()
+            .enumerate()
+            .map(|(ix, page)| {
+                let item = BreadcrumbItem::new(page.crumb.clone());
+                if ix + 1 < depth {
+                    let weak = cx.weak_entity();
+                    item.on_click(move |_, _, cx| {
+                        weak.update(cx, |view, cx| view.go_to_depth(ix, cx)).ok();
+                    })
+                } else {
+                    item
+                }
+            })
+            .collect();
+
+        let search_empty = self.filter_input.read(cx).value().is_empty();
+        let find_kbd = search_empty
+            .then(|| Keystroke::parse("secondary-f").ok())
+            .flatten()
+            .map(Kbd::new);
+
+        // Clicks on controls must not start a title-bar window drag.
+        let controls = || {
+            h_flex()
+                .gap_1()
+                .items_center()
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        };
+
+        TitleBar::new()
+            .h(px(title_bar_height(self.font_size)))
+            .child(
+                h_flex()
+                    .gap_2()
+                    .min_w_0()
+                    .flex_1()
+                    .child(
+                        controls()
+                            .child(
+                                Button::new("nav-back")
+                                    .ghost()
+                                    .small()
+                                    .icon(IconName::ChevronLeft)
+                                    .disabled(depth <= 1)
+                                    .tooltip_with_action("Back", &BackAction, None)
+                                    .on_click(cx.listener(|this, _, _, cx| this.go_back(cx))),
+                            )
+                            .child(
+                                Button::new("nav-forward")
+                                    .ghost()
+                                    .small()
+                                    .icon(IconName::ChevronRight)
+                                    .disabled(self.forward_stack.is_empty())
+                                    .tooltip_with_action("Forward", &ForwardAction, None)
+                                    .on_click(cx.listener(|this, _, _, cx| this.go_forward(cx))),
+                            ),
+                    )
+                    .child(Breadcrumb::new().min_w_0().children(crumbs)),
+            )
+            .child(
+                controls()
+                    .pr_2()
+                    .child(
+                        gpui::div().w(px(240.)).child(
+                            Input::new(&self.filter_input)
+                                .small()
+                                .cleanable(true)
+                                .prefix(
+                                    Icon::new(IconName::Search)
+                                        .small()
+                                        .text_color(cx.theme().muted_foreground),
+                                )
+                                .when_some(find_kbd, |input, kbd| input.suffix(kbd)),
+                        ),
+                    )
+                    .child(
+                        Button::new("toggle-filters")
+                            .ghost()
+                            .small()
+                            .icon(LucideIcon::ListFilter)
+                            .selected(self.show_column_filters)
+                            .tooltip_with_action("Column filters", &ToggleFiltersAction, None)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.toggle_column_filters(window, cx)
+                            })),
+                    )
+                    .child(
+                        Button::new("save")
+                            .ghost()
+                            .small()
+                            .icon(LucideIcon::Download)
+                            .tooltip_with_action("Save as JSON…", &SaveAction, None)
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.start_save_as(window, cx)),
+                            ),
+                    ),
+            )
     }
 }
 
 impl Render for ToGuiView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<ToGuiView>) -> impl IntoElement {
-        let can_back = self.can_go_back();
-        let title = self.current_title();
-        let weak = cx.weak_entity();
-        let weak2 = cx.weak_entity();
+        let (visible, total, cols, col_filters, selected_row) = {
+            let table = self.table_state.read(cx);
+            let d = table.delegate();
+            (
+                d.visible_rows.len(),
+                d.total_rows(),
+                d.columns.len(),
+                d.active_column_filters(),
+                table.selected_row(),
+            )
+        };
 
-        let weak_file_save = cx.weak_entity();
-        let weak_edit = cx.weak_entity();
-        let weak_view = cx.weak_entity();
-        let weak_options = cx.weak_entity();
-        let weak_window = cx.weak_entity();
-        let weak_help = cx.weak_entity();
-        let menu_bar = gpui::div()
-            .h_flex()
-            .gap_2()
-            .px_3()
-            .py_2()
-            .w_full()
-            .border_b_1()
-            .border_color(rgb(0x1f2937))
-            .bg(rgb(0x111827))
-            .child(
-                Button::new("menu-file")
-                    .ghost()
-                    .label("File")
-                    .text_color(rgb(0xf8fafc))
-                    .dropdown_menu(move |menu, _, _| {
-                        let save_weak = weak_file_save.clone();
-                        let close_weak = weak_file_save.clone();
-                        menu.item(PopupMenuItem::new("Save As…").on_click(move |_, _, cx| {
-                            save_weak.update(cx, |view, cx| view.start_save_as(cx)).ok();
-                        }))
-                        .separator()
-                        .item(PopupMenuItem::new("Close").on_click(move |_, _, cx| {
-                            close_weak
-                                .update(cx, |view, cx| {
-                                    view.status_message =
-                                        "Close is not implemented yet".to_string();
-                                    cx.notify();
-                                })
-                                .ok();
-                        }))
-                    }),
-            )
-            .child(
-                Button::new("menu-edit")
-                    .ghost()
-                    .label("Edit")
-                    .text_color(rgb(0xf8fafc))
-                    .dropdown_menu(move |menu, _, _| {
-                        let weak_edit_undo = weak_edit.clone();
-                        let weak_edit_redo = weak_edit.clone();
-                        let weak_edit_copy = weak_edit.clone();
-                        menu.item(PopupMenuItem::new("Undo").on_click(move |_, _, cx| {
-                            weak_edit_undo
-                                .update(cx, |view, cx| {
-                                    view.status_message = "Undo is not implemented yet".to_string();
-                                    cx.notify();
-                                })
-                                .ok();
-                        }))
-                        .item(PopupMenuItem::new("Redo").on_click(move |_, _, cx| {
-                            weak_edit_redo
-                                .update(cx, |view, cx| {
-                                    view.status_message = "Redo is not implemented yet".to_string();
-                                    cx.notify();
-                                })
-                                .ok();
-                        }))
-                        .separator()
-                        .item(PopupMenuItem::new("Copy").on_click(move |_, _, cx| {
-                            weak_edit_copy
-                                .update(cx, |view, cx| {
-                                    view.status_message =
-                                        "Use right-click on a cell to copy".to_string();
-                                    cx.notify();
-                                })
-                                .ok();
-                        }))
-                    }),
-            )
-            .child(
-                Button::new("menu-view")
-                    .ghost()
-                    .label("View")
-                    .text_color(rgb(0xf8fafc))
-                    .dropdown_menu(move |menu, _, _| {
-                        let weak_view_reload = weak_view.clone();
-                        let weak_view_zoomin = weak_view.clone();
-                        menu.item(PopupMenuItem::new("Refresh").on_click(move |_, _, cx| {
-                            weak_view_reload
-                                .update(cx, |view, cx| {
-                                    view.status_message = "Refreshed".to_string();
-                                    cx.notify();
-                                })
-                                .ok();
-                        }))
-                        .item(PopupMenuItem::new("Zoom In").on_click(move |_, _, cx| {
-                            weak_view_zoomin
-                                .update(cx, |view, cx| {
-                                    view.status_message = "Zoom is not implemented yet".to_string();
-                                    cx.notify();
-                                })
-                                .ok();
-                        }))
-                    }),
-            )
-            .child(
-                Button::new("menu-options")
-                    .ghost()
-                    .label("Options")
-                    .text_color(rgb(0xf8fafc))
-                    .dropdown_menu(move |menu, _, _| {
-                        let weak_options_pref = weak_options.clone();
-                        menu.item(PopupMenuItem::new("Preferences").on_click(move |_, _, cx| {
-                            weak_options_pref
-                                .update(cx, |view, cx| {
-                                    view.status_message =
-                                        "Preferences are not implemented yet".to_string();
-                                    cx.notify();
-                                })
-                                .ok();
-                        }))
-                    }),
-            )
-            .child(
-                Button::new("menu-window")
-                    .ghost()
-                    .label("Window")
-                    .text_color(rgb(0xf8fafc))
-                    .dropdown_menu(move |menu, _, _| {
-                        let weak_window_min = weak_window.clone();
-                        menu.item(PopupMenuItem::new("Minimize").on_click(move |_, _, cx| {
-                            weak_window_min
-                                .update(cx, |view, cx| {
-                                    view.status_message =
-                                        "Minimize is not implemented yet".to_string();
-                                    cx.notify();
-                                })
-                                .ok();
-                        }))
-                    }),
-            )
-            .child(
-                Button::new("menu-help")
-                    .ghost()
-                    .label("Help")
-                    .text_color(rgb(0xf8fafc))
-                    .dropdown_menu(move |menu, _, _| {
-                        let weak_help_about = weak_help.clone();
-                        menu.item(PopupMenuItem::new("About").on_click(move |_, _, cx| {
-                            weak_help_about
-                                .update(cx, |view, cx| {
-                                    view.status_message = "to-gui plugin".to_string();
-                                    cx.notify();
-                                })
-                                .ok();
-                        }))
-                    }),
-            );
+        let rows_label = if visible == total {
+            plural(total, "row", "rows")
+        } else {
+            format!("{} of {}", fmt_count(visible), plural(total, "row", "rows"))
+        };
 
-        // In-window toolbar (visible on all platforms; primary on Windows/Linux)
-        let toolbar = gpui::div()
-            .h_flex()
-            .gap_2()
-            .px_3()
-            .py_1()
-            .w_full()
-            .border_b_1()
-            .border_color(rgb(0x1f2937))
-            .bg(rgb(0x0f172a))
-            .when(can_back, |el| {
-                el.child(
-                    gpui::div()
-                        .id("back-btn")
-                        .px_2()
-                        .py_1()
-                        .rounded(px(4.0))
-                        .bg(rgb(0x1f2937))
-                        .text_color(rgb(0xffffff))
-                        .cursor_pointer()
-                        .on_click(move |_, window, cx| {
-                            weak.update(cx, |view, cx| view.pop_page(window, cx)).ok();
-                        })
-                        .child("← Back"),
+        let status_bar = StatusBar::new()
+            .left(
+                h_flex()
+                    .gap_1()
+                    .child(Icon::new(LucideIcon::Rows3).xsmall())
+                    .child(format!(
+                        "{rows_label} · {}",
+                        plural(cols, "column", "columns")
+                    )),
+            )
+            .when(col_filters > 0, |bar| {
+                bar.left(
+                    h_flex()
+                        .gap_1()
+                        .text_color(cx.theme().blue)
+                        .child(Icon::new(LucideIcon::Funnel).xsmall())
+                        .child(plural(col_filters, "column filter", "column filters")),
                 )
             })
-            .child(
-                gpui::div()
-                    .flex_1()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(rgb(0xf8fafc))
-                    .child(title),
-            )
-            .child(
-                gpui::div()
-                    .id("save-btn")
-                    .px_2()
-                    .py_1()
-                    .rounded(px(4.0))
-                    .bg(rgb(0x1f2937))
-                    .text_color(rgb(0xffffff))
-                    .cursor_pointer()
-                    .on_click(move |_, _window, cx| {
-                        weak2
-                            .update(cx, |view, cx| {
-                                view.start_save_as(cx);
-                            })
-                            .ok();
-                    })
-                    .child("💾 Save"),
-            );
+            .when(!self.status_message.is_empty(), |bar| {
+                bar.right(self.status_message.clone())
+            })
+            .when_some(selected_row, |bar, row| {
+                bar.right(format!("Row {}", fmt_count(row + 1)))
+            })
+            .right(self.render_font_size_control(cx));
 
-        // Global search in the status bar.
-        let status_bar = gpui::div()
-            .h_flex()
-            .gap_1()
-            .px_2()
-            .py_1()
-            .w_full()
-            .border_t_1()
-            .border_color(rgb(0x1f2937))
-            .child(
-                gpui::div().flex_shrink_0().w_40().child(
-                    Input::new(&self.filter_input)
-                        .cleanable(true)
-                        .appearance(false)
-                        .bordered(false)
-                        .focus_bordered(false),
-                ),
+        v_flex()
+            .id("to-gui")
+            .key_context(KEY_CONTEXT)
+            .track_focus(&self.focus_handle)
+            .on_action(
+                cx.listener(|this, _: &SaveAction, window, cx| this.start_save_as(window, cx)),
             )
-            .child(
-                gpui::div()
-                    .flex_1()
-                    .text_color(rgb(0xe5e7eb))
-                    .child(self.status_message.clone()),
-            );
-
-        gpui::div()
-            .v_flex()
+            .on_action(cx.listener(|_, _: &CloseWindowAction, window, _| window.remove_window()))
+            .on_action(cx.listener(|this, _: &CopyAction, _, cx| this.copy_selection(cx)))
+            .on_action(
+                cx.listener(|this, _: &FindAction, window, cx| this.focus_search(window, cx)),
+            )
+            .on_action(cx.listener(|this, _: &ToggleFiltersAction, window, cx| {
+                this.toggle_column_filters(window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &ClearFiltersAction, window, cx| {
+                this.clear_filters(window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &BackAction, _, cx| this.go_back(cx)))
+            .on_action(cx.listener(|this, _: &ForwardAction, _, cx| this.go_forward(cx)))
+            .on_action(cx.listener(|_, _: &MinimizeAction, window, _| window.minimize_window()))
+            .on_action(cx.listener(|_, _: &ZoomWindowAction, window, _| window.zoom_window()))
+            .on_action(cx.listener(|this, _: &AboutAction, window, cx| this.show_about(window, cx)))
+            .on_action(cx.listener(|this, _: &IncreaseFontSizeAction, _, cx| {
+                this.set_font_size(this.font_size + 1.0, cx)
+            }))
+            .on_action(cx.listener(|this, _: &DecreaseFontSizeAction, _, cx| {
+                this.set_font_size(this.font_size - 1.0, cx)
+            }))
+            .on_action(cx.listener(|this, _: &ResetFontSizeAction, _, cx| {
+                this.set_font_size(this.configured_font_size, cx)
+            }))
             .size_full()
-            .child(menu_bar)
-            .child(toolbar)
+            .child(self.render_title_bar(cx))
             .child(
                 DataTable::new(&self.table_state)
-                    .stripe(true)
-                    .bordered(true)
+                    .with_size(gpui::component::Size::Size(px(row_height(self.font_size))))
+                    .stripe(false)
+                    .bordered(false)
                     .scrollbar_visible(true, true),
             )
             .child(status_bar)
@@ -1184,9 +1539,34 @@ fn panic_payload_to_string(payload: Box<dyn Any + Send>) -> String {
     "unknown panic payload".to_string()
 }
 
+// Icons outside the default component bundle. Embedding the full Lucide
+// catalog would add several megabytes to the plugin binary.
+gpui::assets::icon_assets!(
+    ExtraIcons,
+    [Download, Funnel, ListFilter, Minus, Plus, Rows3, SearchX]
+);
+
+/// The default component icons plus [`ExtraIcons`].
+struct AppAssets;
+
+impl AssetSource for AppAssets {
+    fn load(&self, path: &str) -> gpui::Result<Option<std::borrow::Cow<'static, [u8]>>> {
+        match ExtraIcons.load(path)? {
+            Some(data) => Ok(Some(data)),
+            None => gpui::assets::Assets.load(path),
+        }
+    }
+
+    fn list(&self, path: &str) -> gpui::Result<Vec<SharedString>> {
+        let mut paths = gpui::assets::Assets.list(path)?;
+        paths.extend(ExtraIcons.list(path)?);
+        Ok(paths)
+    }
+}
+
 #[cfg(not(test))]
 fn build_app() -> Result<Application> {
-    let make_app = || gpui::application().with_assets(gpui::assets::Assets);
+    let make_app = || gpui::application().with_assets(AppAssets);
 
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     {
@@ -1235,25 +1615,28 @@ fn build_app() -> Result<Application> {
 /// Launch the GUI.
 #[cfg(not(test))]
 pub fn run_table_gui(launch: GuiLaunch) -> Result<()> {
-    let GuiLaunch {
-        table,
-        initial_filter,
-        autosize,
-        color_config,
-        save_dir,
-        closure_sources,
-        table_config,
-        rfc3339,
-    } = launch;
+    run_table_gui_with(launch, |_, _| {})
+}
 
+/// Launch the GUI and call `on_open` once the window exists.
+///
+/// The hook lets tooling such as `examples/snapshot.rs` drive the window.
+#[cfg(not(test))]
+pub fn run_table_gui_with(
+    launch: GuiLaunch,
+    on_open: impl FnOnce(AnyWindowHandle, &mut App) + 'static,
+) -> Result<()> {
     let app = build_app()?;
 
-    // Pre-compute the ideal size outside app.run so we can borrow `table`.
-    let size = ideal_window_size(&table, autosize);
+    // Pre-compute the ideal size outside app.run so we can borrow the table.
+    let font_size = clamp_font_size(launch.font_size);
+    let size = ideal_window_size(&launch.table, launch.autosize, font_size);
 
     app.run(move |cx| {
         gpui::init(cx);
-        Theme::change(ThemeMode::Dark, None, cx);
+        configure_theme(cx, font_size);
+        bind_keys(cx);
+        set_menus(cx);
         cx.activate(true);
 
         cx.on_window_closed(|cx, _| {
@@ -1262,156 +1645,125 @@ pub fn run_table_gui(launch: GuiLaunch) -> Result<()> {
             }
         })
         .detach();
+        cx.on_action(|_: &QuitAction, cx| cx.quit());
 
-        // On macOS the system menu bar picks this up.
-        // On Windows/Linux it is a no-op, but the in-window toolbar above
-        // provides the same functionality.
-        cx.set_menus(vec![
-            Menu {
-                name: "File".into(),
-                disabled: false,
-                items: vec![
-                    MenuItem::action("Save As…", SaveAction),
-                    MenuItem::separator(),
-                    MenuItem::action("Close", CloseAction),
-                ],
-            },
-            Menu {
-                name: "Edit".into(),
-                disabled: false,
-                items: vec![
-                    MenuItem::action("Undo", UndoAction),
-                    MenuItem::action("Redo", RedoAction),
-                    MenuItem::separator(),
-                    MenuItem::action("Copy", CopyAction),
-                    MenuItem::action("Paste", PasteAction),
-                ],
-            },
-            Menu {
-                name: "View".into(),
-                disabled: false,
-                items: vec![
-                    MenuItem::action("Reload", ReloadAction),
-                    MenuItem::action("Zoom In", ZoomInAction),
-                    MenuItem::action("Zoom Out", ZoomOutAction),
-                ],
-            },
-            Menu {
-                name: "Options".into(),
-                disabled: false,
-                items: vec![MenuItem::action("Preferences", PreferencesAction)],
-            },
-            Menu {
-                name: "Window".into(),
-                disabled: false,
-                items: vec![
-                    MenuItem::action("Minimize", MinimizeAction),
-                    MenuItem::action("Zoom", ZoomWindowAction),
-                ],
-            },
-            Menu {
-                name: "Help".into(),
-                disabled: false,
-                items: vec![MenuItem::action("About", AboutAction)],
-            },
-        ]);
-
-        let ts = table.clone();
-        let save_dir2 = save_dir.clone();
-        let closure_sources2 = closure_sources.clone();
-        let table_config2 = table_config.clone();
-        let rfc3339_2 = rfc3339;
-        cx.on_action::<SaveAction>(move |_, _app| {
-            let json_rows: Vec<serde_json::Value> = ts
-                .rows
-                .iter()
-                .map(|row| {
-                    let obj: serde_json::Map<String, serde_json::Value> = ts
-                        .columns
-                        .iter()
-                        .zip(row.iter())
-                        .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
-                        .collect();
-                    serde_json::Value::Object(obj)
-                })
-                .collect();
-            if let Ok(json) = serde_json::to_string_pretty(&json_rows) {
-                let path = std::path::PathBuf::from(&save_dir2).join("to-gui-output.json");
-                let _ = std::fs::write(&path, json);
-                eprintln!("to-gui: saved to {}", path.display());
-            }
-        });
-
-        cx.on_action::<CloseAction>(|_, _| {
-            eprintln!("to-gui: Close requested from native menu");
-        });
-        cx.on_action::<UndoAction>(|_, _| {
-            eprintln!("to-gui: Undo requested from native menu");
-        });
-        cx.on_action::<RedoAction>(|_, _| {
-            eprintln!("to-gui: Redo requested from native menu");
-        });
-        cx.on_action::<CopyAction>(|_, _| {
-            eprintln!("to-gui: Copy requested from native menu");
-        });
-        cx.on_action::<PasteAction>(|_, _| {
-            eprintln!("to-gui: Paste requested from native menu");
-        });
-        cx.on_action::<ReloadAction>(|_, _| {
-            eprintln!("to-gui: Reload requested from native menu");
-        });
-        cx.on_action::<ZoomInAction>(|_, _| {
-            eprintln!("to-gui: Zoom In requested from native menu");
-        });
-        cx.on_action::<ZoomOutAction>(|_, _| {
-            eprintln!("to-gui: Zoom Out requested from native menu");
-        });
-        cx.on_action::<PreferencesAction>(|_, _| {
-            eprintln!("to-gui: Preferences requested from native menu");
-        });
-        cx.on_action::<MinimizeAction>(|_, _| {
-            eprintln!("to-gui: Minimize requested from native menu");
-        });
-        cx.on_action::<ZoomWindowAction>(|_, _| {
-            eprintln!("to-gui: Window Zoom requested from native menu");
-        });
-        cx.on_action::<AboutAction>(|_, _| {
-            eprintln!("to-gui: About requested from native menu");
-        });
-
-        // Center the window on the primary display at the computed size.
         let window_options = WindowOptions {
             window_bounds: Some(WindowBounds::centered(size, cx)),
-            ..WindowOptions::default()
+            window_min_size: Some(gpui::size(px(480.), px(240.))),
+            titlebar: Some(TitlebarOptions {
+                title: Some("to gui".into()),
+                // Center the macOS traffic lights in the (font-scaled) title bar.
+                traffic_light_position: Some(point(
+                    px(9.),
+                    px(((title_bar_height(font_size) - 16.) / 2.).round()),
+                )),
+                ..TitleBar::title_bar_options()
+            }),
+            ..TitleBar::window_options()
         };
 
-        cx.spawn(async move |cx| {
-            cx.open_window(window_options, move |window, cx| {
-                let cc = color_config.clone();
-                let save_dir = save_dir.clone();
-                let view = cx.new(|cx| {
-                    ToGuiView::new(
-                        window,
-                        cx,
-                        GuiLaunch {
-                            table: table.clone(),
-                            initial_filter: initial_filter.clone(),
-                            autosize,
-                            color_config: cc,
-                            save_dir,
-                            closure_sources: closure_sources2,
-                            table_config: table_config2,
-                            rfc3339: rfc3339_2,
-                        },
-                    )
-                });
-                cx.new(|cx| Root::new(view, window, cx))
-            })?;
-            Ok::<_, anyhow::Error>(())
-        })
-        .detach();
+        let opened = cx.open_window(window_options, move |window, cx| {
+            let view = cx.new(|cx| ToGuiView::new(window, cx, launch));
+            cx.new(|cx| Root::new(view, window, cx))
+        });
+        match opened {
+            Ok(handle) => on_open(handle.into(), cx),
+            Err(err) => eprintln!("to-gui: failed to open window: {err:#}"),
+        }
     });
     Ok(())
+}
+
+#[cfg(not(test))]
+fn configure_theme(cx: &mut App, font_size: f32) {
+    // Nushell's color_config and LS_COLORS assume a dark terminal, so stay
+    // dark regardless of the OS appearance.
+    Theme::change(ThemeMode::Dark, None, cx);
+    Theme::update(cx, |theme| {
+        theme.font_size = px(font_size);
+    });
+}
+
+#[cfg(not(test))]
+fn bind_keys(cx: &mut App) {
+    let ctx = Some(KEY_CONTEXT);
+    cx.bind_keys([
+        KeyBinding::new("secondary-s", SaveAction, ctx),
+        KeyBinding::new("secondary-w", CloseWindowAction, ctx),
+        KeyBinding::new("secondary-c", CopyAction, ctx),
+        KeyBinding::new("secondary-f", FindAction, ctx),
+        KeyBinding::new("secondary-shift-f", ToggleFiltersAction, ctx),
+        KeyBinding::new("secondary-[", BackAction, ctx),
+        KeyBinding::new("secondary-]", ForwardAction, ctx),
+        KeyBinding::new("secondary-=", IncreaseFontSizeAction, ctx),
+        KeyBinding::new("secondary-+", IncreaseFontSizeAction, ctx),
+        KeyBinding::new("secondary--", DecreaseFontSizeAction, ctx),
+        KeyBinding::new("secondary-0", ResetFontSizeAction, ctx),
+        KeyBinding::new("secondary-q", QuitAction, None),
+    ]);
+    #[cfg(target_os = "macos")]
+    cx.bind_keys([KeyBinding::new("cmd-m", MinimizeAction, ctx)]);
+}
+
+/// Native menus. On macOS the first menu becomes the application menu.
+#[cfg(not(test))]
+fn set_menus(cx: &mut App) {
+    cx.set_menus(vec![
+        Menu {
+            name: "to gui".into(),
+            disabled: false,
+            items: vec![
+                MenuItem::action("About to gui", AboutAction),
+                MenuItem::separator(),
+                MenuItem::action("Quit to gui", QuitAction),
+            ],
+        },
+        Menu {
+            name: "File".into(),
+            disabled: false,
+            items: vec![
+                MenuItem::action("Save As…", SaveAction),
+                MenuItem::separator(),
+                MenuItem::action("Close Window", CloseWindowAction),
+            ],
+        },
+        Menu {
+            name: "Edit".into(),
+            disabled: false,
+            items: vec![
+                MenuItem::action("Copy", CopyAction),
+                MenuItem::separator(),
+                MenuItem::action("Find…", FindAction),
+                MenuItem::action("Column Filters", ToggleFiltersAction),
+                MenuItem::action("Clear Filters", ClearFiltersAction),
+            ],
+        },
+        Menu {
+            name: "View".into(),
+            disabled: false,
+            items: vec![
+                MenuItem::action("Increase Font Size", IncreaseFontSizeAction),
+                MenuItem::action("Decrease Font Size", DecreaseFontSizeAction),
+                MenuItem::action("Reset Font Size", ResetFontSizeAction),
+            ],
+        },
+        Menu {
+            name: "Go".into(),
+            disabled: false,
+            items: vec![
+                MenuItem::action("Back", BackAction),
+                MenuItem::action("Forward", ForwardAction),
+            ],
+        },
+        Menu {
+            name: "Window".into(),
+            disabled: false,
+            items: vec![
+                MenuItem::action("Minimize", MinimizeAction),
+                MenuItem::action("Zoom", ZoomWindowAction),
+            ],
+        },
+    ]);
 }
 
 #[cfg(test)]

@@ -25,5 +25,13 @@ serde_json = "1.0.151"
 [dev-dependencies]
 chrono = { version = "0.4.45", default-features = false, features = ["std"] }
 
+[features]
+# Enables `examples/snapshot.rs`, which renders the window offscreen to a PNG.
+snapshot = ["gpui/test-support"]
+
+[[example]]
+name = "snapshot"
+required-features = ["snapshot"]
+
 [target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.build-dependencies]
 pkg-config = "0.3.34"

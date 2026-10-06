@@ -15,20 +15,37 @@ The intent is to show the output of Nushell commands in a GUI.
 - Disable auto-size with `--no-autosize`.
 - Sort by columns directly in the table.
 - Filter data globally and per-column.
-- Use filter operators like `is:`, `contains:`, `starts-with:`, and `ends-with:` on the column headers.
+- Toggle per-column filters in the headers (title-bar filter button or `Cmd/Ctrl+Shift+F`) and use operators like `is:`, `contains:`, `starts-with:`, and `ends-with:`.
 - Provide an initial global filter using `--filter`.
 - Drill into nested records/lists by double-clicking cells.
-- Navigate back from nested views with the in-window Back control.
+- Navigate nested views with Back/Forward buttons (`Cmd/Ctrl+[` / `Cmd/Ctrl+]`) and a clickable breadcrumb path.
 - Preserve and display many Nushell value types cleanly (including nested values).
 - Optional RFC3339 datetime formatting with `--rfc3339`.
 - Apply Nushell color configuration to table cells and headers.
 - Respect `LS_COLORS` for file-like/table views where applicable.
+- Keep text readable: colors too dark for the background (e.g. `blue` or `black` on the dark theme) are lightened to a 4.5:1 contrast ratio, keeping their hue. `LS_COLORS` backgrounds, such as the README highlight, are drawn behind the file name.
 - Render ANSI-colored text content in cells.
 - Right-click any cell and copy that specific value.
-- Access top-level app menus (File, Edit, View, Options, Window, Help).
+- Native macOS menus and keyboard shortcuts: Save As (`Cmd/Ctrl+S`), Find (`Cmd/Ctrl+F`), Copy selection (`Cmd/Ctrl+C`), Close Window (`Cmd/Ctrl+W`).
+- Status bar with row/column counts, filtered-row count, and the selected row.
+- Adjustable font size (`Cmd/Ctrl+=`, `Cmd/Ctrl+-`, `Cmd/Ctrl+0`, or the status-bar control), with the startup size set in `config.nu`.
 - Save table output to JSON from the GUI.
 - Open data quickly from common Nushell workflows like `ls | to gui` and `$env.config | to gui`.
 - Start with a window size that adapts to table dimensions.
+
+## Configuration
+
+`to gui` reads its settings from `$env.config.plugins.to_gui` in `config.nu`:
+
+```nu
+$env.config.plugins.to_gui = {
+    font_size: 18  # base UI font size in pixels, 10-28 (default 16)
+}
+```
+
+Changing the font size inside the window lasts for that window. When it differs
+from the configured size, the status bar shows **Copy setting**, which copies the
+matching `config.nu` line to the clipboard.
 
 ## Project Layout
 
@@ -45,8 +62,11 @@ The intent is to show the output of Nushell commands in a GUI.
 	- `table.rs`: table-shaping logic from incoming pipeline data.
 - `src/gui.rs`: primary GUI view/delegate, interactions, and app runtime glue.
 - `src/gui_ansi.rs`: ANSI segment parsing for colored text rendering in cells.
-- `src/window_sizing.rs`: initial window-size calculation logic.
+- `src/settings.rs`: plugin settings read from `$env.config.plugins.to_gui`.
+- `src/window_sizing.rs`: font-scaled sizing for the window, title bar, rows, and columns.
 - `tests/plugin.rs`: integration tests for plugin command metadata/signature.
+- `examples/snapshot.rs`: renders the window offscreen to a PNG with sample data
+  (`cargo run --example snapshot --features snapshot -- out.png`).
 
 ## Data Flow
 

@@ -78,26 +78,54 @@ fn parse_ls_color_value(spec: &str) -> Option<Rgba> {
     None
 }
 
-fn parse_ls_colors(ls_colors: &str) -> HashMap<String, Rgba> {
+/// Parse an LS_COLORS entry such as `01;34` or `38;5;16;48;5;186`, keeping
+/// the background and bold along with the foreground. Falls back to Nushell
+/// color names for record-style LS_COLORS values.
+fn parse_ls_style(spec: &str) -> Option<CellStyle> {
+    // `0` resets to the default color: use the theme's text color.
+    if matches!(spec.trim(), "" | "0" | "00") {
+        return None;
+    }
+    if let Some(style) = lscolors::Style::from_ansi_sequence(spec) {
+        let cell = lscolors_style_to_cell(&style);
+        if cell.fg.is_some() || cell.bg.is_some() {
+            return Some(cell);
+        }
+    }
+    parse_ls_color_value(spec).map(|fg| CellStyle {
+        fg: Some(fg),
+        ..CellStyle::default()
+    })
+}
+
+fn lscolors_style_to_cell(style: &lscolors::Style) -> CellStyle {
+    CellStyle {
+        fg: style.foreground.map(lscolors_color_to_rgba),
+        bg: style.background.map(lscolors_color_to_rgba),
+        bold: style.font_style.bold,
+    }
+}
+
+fn parse_ls_colors(ls_colors: &str) -> HashMap<String, CellStyle> {
     let mut out = HashMap::new();
     for pair in ls_colors.split(':') {
         let mut it = pair.splitn(2, '=');
         let Some(key) = it.next() else { continue };
         let Some(val) = it.next() else { continue };
-        if let Some(color) = parse_ls_color_value(val) {
-            out.insert(key.to_string(), color);
+        if let Some(style) = parse_ls_style(val) {
+            out.insert(key.to_string(), style);
         }
     }
     out
 }
 
-fn parse_ls_colors_record(record: &Record) -> HashMap<String, Rgba> {
+fn parse_ls_colors_record(record: &Record) -> HashMap<String, CellStyle> {
     let mut out = HashMap::new();
     for (key, value) in record.iter() {
         if let Value::String { val, .. } = value
-            && let Some(color) = parse_ls_color_value(val)
+            && let Some(style) = parse_ls_style(val)
         {
-            out.insert(key.clone(), color);
+            out.insert(key.clone(), style);
         }
     }
     out
@@ -377,7 +405,7 @@ fn collect_name_strings(v: &Value, out: &mut Vec<String>) {
     }
 }
 
-fn default_ls_colors_from_nushell(values: &[Value]) -> HashMap<String, Rgba> {
+fn default_ls_colors_from_nushell(values: &[Value]) -> HashMap<String, CellStyle> {
     let mut out = HashMap::new();
     let ls: LsColors = nu_utils::get_ls_colors(None);
 
@@ -394,10 +422,11 @@ fn default_ls_colors_from_nushell(values: &[Value]) -> HashMap<String, Rgba> {
     ];
 
     for (key, ind) in indicators {
-        if let Some(style) = ls.style_for_indicator(ind)
-            && let Some(fg) = style.foreground
-        {
-            out.insert(key.to_string(), lscolors_color_to_rgba(fg));
+        if let Some(style) = ls.style_for_indicator(ind) {
+            let cell = lscolors_style_to_cell(style);
+            if cell.fg.is_some() || cell.bg.is_some() {
+                out.insert(key.to_string(), cell);
+            }
         }
     }
 
@@ -411,10 +440,11 @@ fn default_ls_colors_from_nushell(values: &[Value]) -> HashMap<String, Rgba> {
             && dot + 1 < name.len()
         {
             let ext = name[dot + 1..].to_ascii_lowercase();
-            if let Some(style) = ls.style_for_str(&name)
-                && let Some(fg) = style.foreground
-            {
-                out.insert(format!("*.{}", ext), lscolors_color_to_rgba(fg));
+            if let Some(style) = ls.style_for_str(&name) {
+                let cell = lscolors_style_to_cell(style);
+                if cell.fg.is_some() || cell.bg.is_some() {
+                    out.insert(format!("*.{}", ext), cell);
+                }
             }
         }
     }
@@ -633,15 +663,30 @@ mod tests {
     #[test]
     fn parse_ls_colors_basic_ansi() {
         let map = parse_ls_colors("di=01;34:fi=0:ln=01;36:*.rs=01;31");
-        assert_eq!(map.get("di"), Some(&gpui::rgb(0x000080)));
-        assert_eq!(map.get("ln"), Some(&gpui::rgb(0x008080)));
-        assert_eq!(map.get("*.rs"), Some(&gpui::rgb(0x800000)));
+        let fg = |key: &str| map.get(key).and_then(|s| s.fg);
+        assert_eq!(fg("di"), Some(gpui::rgb(0x000080)));
+        assert_eq!(fg("ln"), Some(gpui::rgb(0x008080)));
+        assert_eq!(fg("*.rs"), Some(gpui::rgb(0x800000)));
+        assert!(map.get("di").is_some_and(|s| s.bold));
+        assert!(!map.contains_key("fi"));
+    }
+
+    #[test]
+    fn parse_ls_colors_keeps_background() {
+        // Nushell's default LS_COLORS highlights README files this way.
+        let map = parse_ls_colors("*README.md=38;5;16;48;5;186");
+        let style = map.get("*README.md").expect("parsed");
+        assert_eq!(style.fg, Some(gpui::rgb(0x000000)));
+        assert_eq!(style.bg, Some(xterm_256_to_rgb(186)));
     }
 
     #[test]
     fn parse_ls_colors_xterm_256_and_truecolor() {
         let map = parse_ls_colors("*.nu=38;5;196:*.md=38;2;1;2;3");
         assert!(map.contains_key("*.nu"));
-        assert_eq!(map.get("*.md"), Some(&gpui::rgb(0x010203)));
+        assert_eq!(
+            map.get("*.md").and_then(|s| s.fg),
+            Some(gpui::rgb(0x010203))
+        );
     }
 }
