@@ -118,15 +118,9 @@ mod tests {
 
     #[test]
     fn fallback_serializes_unhandled_values() {
-        use nu_protocol::ShellError;
+        use nu_protocol::{ShellError, shell_error::generic::GenericError};
 
-        let err_val = ShellError::GenericError {
-            error: "bad".into(),
-            msg: "bad".into(),
-            span: None,
-            help: None,
-            inner: vec![],
-        };
+        let err_val = ShellError::Generic(GenericError::new_internal("bad", "bad"));
         let err = Value::error(err_val, Span::unknown());
         let s = value_to_string(&err);
         assert!(s.trim_start().starts_with('{'));
