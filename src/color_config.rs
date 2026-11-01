@@ -4,6 +4,7 @@ use gpui::Rgba;
 use lscolors::{Indicator as LsIndicator, LsColors};
 use nu_ansi_term::Color as AnsiColor;
 use nu_plugin::EngineInterface;
+use nu_protocol::engine::Closure;
 use nu_protocol::{Record, Spanned, Value};
 use std::collections::HashMap;
 
@@ -464,6 +465,27 @@ fn style_from_color_value(value: &Value) -> Option<CellStyle> {
     })
 }
 
+/// Evaluate a color closure for `sample`, first passing it as a positional argument and then
+/// as pipeline input (`$in`).
+///
+/// Errors are discarded on purpose: a closure that fails both ways contributes no style.
+/// Chaining on `Option` rather than `Result` also keeps the large `ShellError` out of the
+/// fallback closure, which `clippy::result_large_err` would otherwise reject.
+fn eval_color_closure(
+    engine: &EngineInterface,
+    closure: &Spanned<Closure>,
+    sample: &Value,
+) -> Option<Value> {
+    engine
+        .eval_closure(closure, vec![sample.clone()], None)
+        .ok()
+        .or_else(|| {
+            engine
+                .eval_closure(closure, vec![], Some(sample.clone()))
+                .ok()
+        })
+}
+
 fn apply_closure_color_overrides(
     color_config: &mut ColorConfig,
     map: &HashMap<String, Value>,
@@ -491,11 +513,7 @@ fn apply_closure_color_overrides(
             span: entry.span(),
         };
 
-        let result = engine
-            .eval_closure(&closure, vec![sample.clone()], None)
-            .or_else(|_| engine.eval_closure(&closure, vec![], Some(sample)));
-
-        let Ok(result) = result else {
+        let Some(result) = eval_color_closure(engine, &closure, &sample) else {
             if debug {
                 eprintln!("to-gui[color]: closure key '{}' failed to evaluate", key);
             }
@@ -529,11 +547,7 @@ fn apply_closure_color_overrides(
 
         let samples = collect_values_for_style_key(values, key);
         for sample in samples.into_iter().take(512) {
-            let result = engine
-                .eval_closure(&closure, vec![sample.clone()], None)
-                .or_else(|_| engine.eval_closure(&closure, vec![], Some(sample.clone())));
-
-            let Ok(result) = result else {
+            let Some(result) = eval_color_closure(engine, &closure, &sample) else {
                 continue;
             };
 
